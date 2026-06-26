@@ -1,0 +1,77 @@
+.filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 24px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.filter-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.filter-group label {
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  font-weight: 700;
+  color: var(--text-lo);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  white-space: nowrap;
+}
+
+.filter-group select {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text-hi);
+  padding: 4px 8px;
+  font-size: 0.82rem;
+  cursor: pointer;
+  outline: none;
+  transition: border-color 0.12s;
+}
+
+.filter-group select:hover,
+.filter-group select:focus {
+  border-color: var(--border-hi);
+  color: var(--text-hi);
+}
+
+.filter-group select:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: 2px;
+}
+
+.filter-group select option:disabled {
+  color: var(--text-lo);
+}
+
+.sort-group {
+  flex: 1;
+  min-width: 200px;
+}
+
+.sort-tip {
+  font-size: 0.8rem;
+  color: var(--text-lo);
+  cursor: help;
+  user-select: none;
+}
+.sort-tip:hover {
+  color: var(--text-mid);
+}
+
+@media (max-width: 600px) {
+  .filter-bar {
+    padding: 8px 12px;
+    gap: 8px;
+  }
+  .sort-group {
+    min-width: 140px;
+  }
+}

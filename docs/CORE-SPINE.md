@@ -64,22 +64,47 @@ while URLs are fresh:
 
 ## Ranking — on-demand, multi-strategy (Q-1 resolved: user picks the sort)
 Computed at query time over stored rows (no precompute table for the prototype). Each sort is a
-function: raw counts · engagement-rate · share-rate (where available) · save-rate (TikTok only) ·
-velocity (latest vs earlier snapshot) · relative-to-baseline (vs the account's median) ·
-cross-persona breadth (distinct sources). Query params: geo_tier, period_days, platform, sort.
+function: raw counts · engagement-rate (÷views) · **engagement-rate-followers (÷author follower
+count)** · share-rate (where available) · save-rate (TikTok only) · velocity (latest vs earlier
+snapshot) · relative-to-baseline (vs the account's median) · cross-persona breadth (distinct sources).
+Query params: geo_tier, period_days, platform, sort.
 **Degrade/disable** sorts per platform + per data-availability (SIGNALS.md, Q-1 caveats). Default
-sort = engagement-rate (the only universal one).
+sort = engagement-rate ÷views (the standard virality read). **Follower-normalized engagement** is a
+selectable sort and the only denominator present on **all four** platforms (Threads has no views), so
+it doubles as the universal cross-platform normalizer — computable from a single snapshot.
 **Period filter (decided 2026-06-26):** the `period_days` filter keys on **`first_seen_at`**
 (recency-*to-us*), NOT `posted_at`. Discovery/FYP posts skew evergreen (60–90d old — TikTok README),
 so a `posted_at` filter would silently drop the very posts Layer-2 exists to surface. Keying on
 first-seen keeps them as "new to us." `posted_at` is exposed as an optional secondary filter for true
 post-freshness.
 
-## Scheduler / runner (recommended)
-A single `run_ingestion()` entrypoint that pulls from all configured adapters/seeds/watchlist and
-writes posts + snapshots + thumbnails + the new top-N Content Bundles (rank + enrich happen here,
-while URLs are fresh). Triggered daily (cron/systemd-timer) OR manually — the UI "Refresh" button
-background-triggers this same entrypoint.
+## Daily pipeline / runner (decided 2026-06-26)
+A single `run_ingestion()` entrypoint. **Current gap:** its live-adapter harvest (Step 2) is a STUB —
+it only seeds from the scratch JSON, ranks, and enriches. **Next build:** wire the 4 adapters into
+Step 2 + add per-stage timing so a clean wipe-and-run yields a real duration estimate.
+
+**Per-platform lanes (decided):** each platform is an INDEPENDENT lane —
+`scrape platform → store → rank within that platform → enrich its top-N (fresh URLs) → it's renderable`.
+Do **not** wait for all four platforms; a finished platform's ranked+enriched posts surface
+immediately. This both respects URL expiry and feeds continuous rendering lane-by-lane.
+
+**Trigger (decided):** **manual-only for v1** — the UI "Refresh" button background-triggers
+`run_ingestion()` (+ `/refresh/status`). A real scheduler (systemd-timer/cron, $0, home box must be
+powered on) is **deferred** until the end-to-end run is proven.
+
+**Volume reality:** "1000/platform/day" is platform-shaped, not flat. IG Explore (~500/run) and X
+(paginate across accounts) are reachable; **TikTok FYP (~15–25/session) is the bottleneck** and needs
+spaced runs — higher TikTok volume is what the captcha experiment (ADR-0004) + Q-3 IP rotation unlock.
+Target each platform's polite ceiling + accumulate across spaced runs; don't hard-chase 1000 (that
+invites bans).
+
+## Continuous rendering (decided 2026-06-26)
+No blocking spinner. Two parts:
+- **Initial load:** paginated `/digest` + infinite scroll + per-card skeletons + lazy media → first
+  cards render instantly.
+- **During a refresh:** the UI **polls `/digest` every few seconds and appends/re-ranks** as posts
+  land (fits the read-only-API + separate-ingestion design — ingestion writes SQLite incrementally,
+  per lane). Server-Sent Events / WebSocket streaming is a later upgrade, not v1.
 
 ## UI surface — FastAPI + React (ADR-0003)
 `api/` = FastAPI exposing the `core` ranker as JSON (`GET /digest?geo=&period=&platform=&sort=`). The
@@ -90,6 +115,13 @@ ingestion-in-a-web-request is rejected — 4 headed browsers would block/timeout
 have no `DISPLAY`.) `web/` = React SPA: dropdown filters (geo / period / platform / sort) → API calls
 → grid of video cards (thumbnail, stats, the chosen score). Disable/gray sorts per SIGNALS.md + Q-1
 caveats. Heavier than HTMX on purpose — we expect frontend needs to grow.
+**Post Content Bundle view (decided 2026-06-26):** beyond the card grid, each post opens a full
+Instagram-style **specimen viewer** (lightbox) showing the downloaded Content Bundle — playable
+video / swipeable carousel / image, caption + hashtags, **spoiler blur-to-reveal** (Threads CW),
+a **playable music chip + title**, engagement stats (degraded per SIGNALS — never a fake 0), a
+provenance strip, and an **"open original" link**. Non-enriched long-tail posts degrade to
+thumbnail + stats + caption + link. The API gains a read-only static mount of `data/media/` and a
+`GET /post/{platform}/{platform_post_id}` Content Bundle endpoint.
 
 ## Enrichment / Layer-3 (a STEP INSIDE ingestion — produces Content Bundles)
 After ranking, the **top-N only** feed Layer-3, which performs **pure content EXTRACTION** (decided
@@ -136,8 +168,17 @@ the sound/music, and the author identity, then writes one `post_content` row via
   the eventual Postgres migration (Q-5) cheap. Adapters still never touch the DB; only `core` does.
 - **DB schema ownership:** the **spine** track owns ALL DDL (`posts` incl. `thumbnail_path`,
   `post_snapshots`, `accounts`, `post_content`). Other tracks read/write only via `core.storage`.
-- **History-gated sorts:** velocity / relative-to-baseline / cross-persona breadth enable once a post
-  has **≥3 distinct snapshot days**; otherwise grayed out in the UI ("needs N days of data").
+- **Gated sorts — three INDEPENDENT gates (refined 2026-06-26):** only ONE sort is truly
+  time-dependent. Each grays out in the UI on its *own* gate:
+  - **velocity** — TIME gate: needs **≥2 snapshots separated in time** ("rising" is undefinable from
+    one point). The only genuinely history-dependent sort.
+  - **relative-to-baseline** — CORPUS gate: needs **≥3 other posts of the same account**, NOT calendar
+    time. A single scrape of an account's recent posts (`fetch_account_posts` returns ~30 + follower
+    count) makes the median computable on **day one**. (Cheap for Watchlist accounts we scrape anyway;
+    a *discovered* creator needs one extra profile scrape to populate their corpus.)
+  - **cross-persona breadth** — SOURCE gate: needs **≥2 distinct sources**; breadth accrues across
+    persona/seed harvests, not calendar days.
+  - **engagement-rate-followers** — gated only on a non-null follower count (one field, one snapshot).
 - **Media download (Layer-3):** direct CDN GET using the URL+headers from `raw`; **fall back to
   yt-dlp** for TikTok video files that need signing. Thumbnails are always a plain image GET.
 - **Media retention:** keep all downloaded media **forever** for the prototype (mirror Q-5's

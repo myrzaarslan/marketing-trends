@@ -1,0 +1,272 @@
+.digest-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  transition: border-color 0.15s, box-shadow 0.15s, transform 0.15s;
+  cursor: default;
+}
+
+.digest-card--clickable {
+  cursor: pointer;
+}
+
+.digest-card--clickable:hover {
+  border-color: var(--amber-dim);
+  box-shadow: 0 0 0 1px var(--amber-dim), 0 4px 20px rgba(0, 0, 0, 0.4);
+  transform: translateY(-1px);
+}
+
+.digest-card:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .digest-card, .digest-card--clickable:hover {
+    transform: none;
+    transition: none;
+  }
+}
+
+/* ── Thumbnail ──────────────────────────────────────────────────────────── */
+
+.card-thumb {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  background: #0A0A0B;
+  overflow: hidden;
+}
+
+.card-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transition: opacity 0.2s;
+}
+
+.digest-card--clickable:hover .card-thumb img {
+  opacity: 0.9;
+}
+
+.card-thumb-placeholder {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #0E0E10;
+  color: var(--text-lo);
+  font-size: 2.5rem;
+  font-weight: 700;
+}
+
+/* Rank chip — the specimen label */
+.card-rank {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: var(--amber);
+  background: rgba(8, 8, 9, 0.85);
+  padding: 2px 7px;
+  border-radius: 4px;
+  letter-spacing: 0.04em;
+  border: 1px solid rgba(212, 136, 42, 0.25);
+}
+
+/* Platform badge */
+.card-platform-badge {
+  position: absolute;
+  bottom: 8px;
+  left: 8px;
+  font-size: 0.65rem;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 3px;
+  color: #fff;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+}
+
+.card-platform-badge[data-platform="tiktok"]    { background: rgba(254, 44, 85, 0.9); }
+.card-platform-badge[data-platform="instagram"] { background: rgba(193, 53, 132, 0.9); }
+.card-platform-badge[data-platform="x"]         { background: rgba(26, 140, 216, 0.9); }
+.card-platform-badge[data-platform="threads"]   { background: rgba(0, 149, 246, 0.9); }
+
+/* Media type icon */
+.card-media-type {
+  position: absolute;
+  bottom: 8px;
+  right: 8px;
+  font-size: 0.65rem;
+  color: rgba(255, 255, 255, 0.5);
+  background: rgba(8, 8, 9, 0.6);
+  padding: 2px 5px;
+  border-radius: 3px;
+}
+
+/* Bundle badge */
+.card-bundle-badge {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  font-size: 0.75rem;
+  color: var(--amber);
+  background: rgba(8, 8, 9, 0.8);
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 1px solid rgba(212, 136, 42, 0.3);
+  cursor: inherit;
+}
+
+/* ── Body ───────────────────────────────────────────────────────────────── */
+
+.card-body {
+  padding: 11px 12px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1;
+}
+
+.card-handle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.card-handle-text {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-hi);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.card-handle-link {
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.card-handle-link:hover {
+  text-decoration: underline;
+}
+
+.card-geo {
+  font-size: 0.65rem;
+  background: var(--surface-3);
+  color: var(--text-mid);
+  padding: 1px 5px;
+  border-radius: 3px;
+  margin-left: auto;
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+}
+
+.card-caption {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--text-mid);
+  line-height: 1.4;
+}
+
+.card-hashtags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+}
+
+.card-hashtag {
+  font-size: 0.68rem;
+  color: var(--amber-dim);
+  background: rgba(212, 136, 42, 0.08);
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+
+/* ── Stats ──────────────────────────────────────────────────────────────── */
+
+.card-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--text-mid);
+}
+
+.card-stats span {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  white-space: nowrap;
+}
+
+.stat-icon {
+  font-size: 0.7rem;
+}
+
+/* ── Footer ─────────────────────────────────────────────────────────────── */
+
+.card-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: auto;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.card-score {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+}
+
+.score-label {
+  font-size: 0.6rem;
+  color: var(--text-lo);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.score-value {
+  font-family: var(--font-mono);
+  font-size: 0.88rem;
+  font-weight: 700;
+  color: var(--amber);
+  font-variant-numeric: tabular-nums;
+}
+
+.score-degraded {
+  font-size: 0.65rem;
+  color: #665533;
+}
+
+.card-meta-right {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.card-history-gate {
+  font-size: 0.62rem;
+  font-family: var(--font-mono);
+  color: #665533;
+  background: rgba(102, 85, 51, 0.15);
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+
+.card-age {
+  font-size: 0.68rem;
+  font-family: var(--font-mono);
+  color: var(--text-lo);
+}

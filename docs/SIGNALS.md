@@ -15,12 +15,19 @@ the **same signals across all platforms** — within what each platform actually
 **Tier 2 — derived by `core`, needs storage/history (adapters must NOT compute these):**
 - **Engagement rate** = (likes+comments+shares+saves)/views
 - **Share rate** = shares/views · **Save rate** = saves/views
-- **Velocity** = Δcounts across snapshots over time → "rising now" (needs repeated snapshots)
-- **Relative-to-baseline** = views vs the creator's own median (needs creator history)
-- **Cross-persona breadth** = how many distinct personas' feeds a video appeared in
+- **Velocity** = Δcounts across snapshots over time → "rising now" (needs repeated snapshots — the
+  ONLY truly time-dependent sort)
+- **Relative-to-baseline** = views vs the creator's own median (needs the creator's **other posts**,
+  NOT time — one scrape of the account's recent posts makes it computable immediately)
+- **Cross-persona breadth** = how many distinct personas' feeds a video appeared in (needs multiple
+  distinct sources, accrued across harvests — not calendar days)
+- **Engagement-rate-followers** = engagement ÷ follower count (needs only the follower count, present
+  in a single snapshot; the one denominator that exists on all four platforms)
 
-Adapters capture Tier 1 + `raw`; `core` computes Tier 2 over stored snapshots. This is why
-velocity / baseline / breadth all require the storage spine — they can't come from one scrape.
+Adapters capture Tier 1 + `raw`; `core` computes Tier 2 over stored rows. Only **velocity** truly
+needs repeated snapshots over time. **Baseline** needs the account's post *corpus* (cheap — scrape the
+account once); **breadth** needs multiple distinct sources; **follower-rate** needs one field. See
+CORE-SPINE.md "three independent gates" for the exact per-sort gating.
 
 ## Per-platform availability (HONEST — not every signal exists everywhere)
 

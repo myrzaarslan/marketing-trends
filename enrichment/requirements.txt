@@ -1,0 +1,6 @@
+# enrichment/ dependencies
+# All HTTP/download deps are already in the project venv via other adapters.
+# Listing here for explicitness; pin to the versions already installed.
+requests>=2.34.2
+# yt-dlp is the TikTok video fallback — already in adapters/tiktok/requirements.txt
+yt-dlp>=2026.6.9

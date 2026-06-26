@@ -138,6 +138,26 @@ def _ts() -> str:
     return datetime.now(timezone.utc).strftime("%H:%M:%S")
 
 
+def _guard_nonempty_raw(post: Any) -> bool:
+    """INGESTION-CONTRACT guard: return True only when ``raw`` is populated.
+
+    An empty ``raw`` means the adapter failed to preserve the original platform
+    payload. Persisting such a row silently would produce a data-quality hole that
+    is impossible to fix without re-fetching. Rows that fail this guard are
+    logged and skipped; they will be re-fetched on the next run (idempotent).
+    """
+    if not post.raw:
+        import logging as _logging
+        _logging.warning(
+            "Threads post %s (%s) has empty raw — INGESTION-CONTRACT violation; "
+            "skipping so the hole is never persisted. Will re-fetch next run.",
+            post.platform_post_id,
+            post.account_handle,
+        )
+        return False
+    return True
+
+
 def _post_to_row(post: Any) -> dict[str, Any]:
     """Serialize a PostRecord to a canonical JSON row.
 
@@ -323,6 +343,12 @@ def main() -> None:
             new_count = 0
             for p in posts:
                 if p.platform_post_id not in posts_by_id:
+                    if not _guard_nonempty_raw(p):
+                        print(
+                            f"  WARNING: post {p.platform_post_id} empty raw "
+                            "— skipping (INGESTION-CONTRACT violation)"
+                        )
+                        continue
                     posts_by_id[p.platform_post_id] = _post_to_row(p)
                     new_count += 1
 

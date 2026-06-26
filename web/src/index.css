@@ -1,0 +1,16 @@
+:root {
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+}
+
+a {
+  color: inherit;
+}
+
+select, button, input, textarea {
+  font-family: inherit;
+}
