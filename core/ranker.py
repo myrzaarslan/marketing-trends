@@ -152,6 +152,79 @@ def sort_availability(
     )
 
 
+def real_sort_availability(
+    session: Session, platform: Optional[str] = None
+) -> dict[SortKey, bool]:
+    """DB-backed availability for GET /digest/meta — reflects what the corpus supports.
+
+    Unlike the coarse `sort_availability`, this inspects actual data so a gated sort
+    is enabled when *any* qualifying post/account exists (per-post graying in rank()
+    still applies to individual cards):
+      * velocity          — any post with >= MIN_VELOCITY_SNAPSHOTS snapshots
+      * relative_baseline — any account with >= MIN_BASELINE_POSTS posts
+      * cross_persona     — any post with >= MIN_BREADTH_SOURCES distinct sources
+      * engagement_rate_followers — any snapshot with a non-null follower count
+    """
+    from sqlalchemy import distinct, func
+
+    def _pfilter(q, col):
+        return q.filter(col == platform) if platform else q
+
+    # velocity: max snapshots for a single post
+    vel_q = _pfilter(
+        session.query(func.count(PostSnapshot.id)).group_by(
+            PostSnapshot.platform, PostSnapshot.platform_post_id
+        ),
+        PostSnapshot.platform,
+    )
+    has_velocity = any(r[0] >= MIN_VELOCITY_SNAPSHOTS for r in vel_q.all())
+
+    # relative_baseline: any account with enough posts
+    base_q = _pfilter(
+        session.query(func.count(Post.platform_post_id)).group_by(
+            Post.platform, Post.account_handle
+        ),
+        Post.platform,
+    )
+    has_baseline = any(r[0] >= MIN_BASELINE_POSTS for r in base_q.all())
+
+    # cross_persona: any post observed from enough distinct sources
+    src_q = _pfilter(
+        session.query(func.count(distinct(PostSnapshot.source))).group_by(
+            PostSnapshot.platform, PostSnapshot.platform_post_id
+        ),
+        PostSnapshot.platform,
+    )
+    has_breadth = any(r[0] >= MIN_BREADTH_SOURCES for r in src_q.all())
+
+    has_followers = (
+        _pfilter(
+            session.query(PostSnapshot.id).filter(
+                PostSnapshot.author_follower_count.isnot(None)
+            ),
+            PostSnapshot.platform,
+        ).first()
+        is not None
+    )
+
+    unavail = PLATFORM_UNAVAILABLE.get(platform or "", frozenset())
+    result: dict[SortKey, bool] = {}
+    for key in ALL_SORTS:
+        if key in unavail:
+            result[key] = False
+        elif key in TIME_GATED:
+            result[key] = has_velocity
+        elif key in CORPUS_GATED:
+            result[key] = has_baseline
+        elif key in SOURCE_GATED:
+            result[key] = has_breadth
+        elif key == "engagement_rate_followers":
+            result[key] = has_followers
+        else:
+            result[key] = True
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Score computation helpers
 # ---------------------------------------------------------------------------

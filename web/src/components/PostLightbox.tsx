@@ -1,13 +1,21 @@
 import { useEffect, useRef, useState } from 'react';
-import type { ContentBundle, DigestCard } from '../types';
+import type { Collection, ContentBundle, DigestCard } from '../types';
 import { fetchPost } from '../api';
 import { profileUrl } from '../platformLinks';
+import { SaveMenu } from './SaveMenu';
+import { NoteEditor } from './NoteEditor';
 import './PostLightbox.css';
 
 interface Props {
   card: DigestCard;
   rank: number;
   onClose: () => void;
+  collections: Collection[];
+  onTogglePin: (card: DigestCard) => void;
+  onToggleHide: (card: DigestCard) => void;
+  onToggleCollection: (card: DigestCard, collectionId: number, makeMember: boolean) => void;
+  onCreateCollection: (title: string) => Promise<Collection | null>;
+  onSaveNote: (card: DigestCard, body: string) => void;
 }
 
 const PLATFORM_LABELS: Record<string, string> = {
@@ -205,10 +213,21 @@ function TextHero({ caption }: { caption: string }) {
 // Main lightbox
 // ---------------------------------------------------------------------------
 
-export function PostLightbox({ card, rank, onClose }: Props) {
+export function PostLightbox({
+  card,
+  rank,
+  onClose,
+  collections,
+  onTogglePin,
+  onToggleHide,
+  onToggleCollection,
+  onCreateCollection,
+  onSaveNote,
+}: Props) {
   const [bundle, setBundle] = useState<ContentBundle | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [saveOpen, setSaveOpen] = useState(false);
 
   useEffect(() => {
     setLoading(true);
@@ -309,6 +328,48 @@ export function PostLightbox({ card, rank, onClose }: Props) {
                 <span className="lb-score-val">{fmtScore(b.score)}</span>
               </span>
             )}
+
+            <div className="lb-actions">
+              <button
+                type="button"
+                className={`lb-action${card.pinned ? ' lb-action--on' : ''}`}
+                onClick={() => onTogglePin(card)}
+                title={card.pinned ? 'Pinned — stays across refresh' : 'Pin (keep across refresh)'}
+                aria-pressed={card.pinned}
+              >
+                📌
+              </button>
+              <div className="lb-action-wrap">
+                <button
+                  type="button"
+                  className={`lb-action${(card.collection_ids?.length ?? 0) > 0 ? ' lb-action--on' : ''}`}
+                  onClick={() => setSaveOpen((v) => !v)}
+                  title="Save to collection"
+                  aria-pressed={(card.collection_ids?.length ?? 0) > 0}
+                >
+                  🔖
+                </button>
+                {saveOpen && (
+                  <SaveMenu
+                    collections={collections}
+                    memberIds={card.collection_ids ?? []}
+                    onToggle={(cid, makeMember) => onToggleCollection(card, cid, makeMember)}
+                    onCreate={onCreateCollection}
+                    onClose={() => setSaveOpen(false)}
+                  />
+                )}
+              </div>
+              <button
+                type="button"
+                className={`lb-action${card.hidden ? ' lb-action--on' : ''}`}
+                onClick={() => onToggleHide(card)}
+                title={card.hidden ? 'Hidden — won’t appear in digest' : 'Hide (don’t show me this)'}
+                aria-pressed={card.hidden}
+              >
+                🚫
+              </button>
+            </div>
+
             <button className="lb-close" onClick={onClose} aria-label="Close viewer">✕</button>
           </div>
         </header>
@@ -385,6 +446,12 @@ export function PostLightbox({ card, rank, onClose }: Props) {
                     ))}
                   </div>
                 )}
+
+                {/* Note — global per post */}
+                <div className="lb-section">
+                  <h3 className="lb-section-label">Note</h3>
+                  <NoteEditor value={card.note} onSave={(body) => onSaveNote(card, body)} />
+                </div>
 
                 {/* Stats — only show signals the platform actually exposes,
                     and only render the section if at least one value exists

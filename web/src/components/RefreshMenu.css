@@ -1,0 +1,43 @@
+.refresh-menu { position: relative; display: inline-block; }
+
+.refresh-dropdown {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  z-index: 50;
+  margin-top: 6px;
+  width: 280px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+  padding: 6px;
+}
+
+.refresh-opt {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: 7px;
+  padding: 9px 10px;
+  cursor: pointer;
+  color: var(--text-hi);
+}
+
+.refresh-opt:hover { background: var(--surface-2); }
+.refresh-opt:disabled { opacity: 0.45; cursor: default; background: transparent; }
+
+.refresh-opt-title { font-size: 13px; font-weight: 600; }
+.refresh-opt-sub { font-size: 11px; color: var(--text-mid); }
+
+.refresh-opt--primary .refresh-opt-title { color: var(--amber); }
+
+.refresh-sep {
+  height: 1px;
+  background: var(--border);
+  margin: 6px 4px;
+}

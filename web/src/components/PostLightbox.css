@@ -762,3 +762,25 @@
     padding: 16px;
   }
 }
+
+/* ── Lightbox action toolbar ────────────────────────────────────────────── */
+
+.lb-actions { display: inline-flex; gap: 6px; }
+.lb-action-wrap { position: relative; }
+
+.lb-action {
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.lb-action:hover { background: var(--surface-3); border-color: var(--border-hi); }
+.lb-action--on { border-color: var(--amber); box-shadow: 0 0 0 1px var(--amber); }

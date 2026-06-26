@@ -1,11 +1,25 @@
-import type { DigestCard as DigestCardType } from '../types';
+import { useState } from 'react';
+import type { Collection, DigestCard as DigestCardType } from '../types';
 import { profileUrl } from '../platformLinks';
+import { SaveMenu } from './SaveMenu';
+import { NoteEditor } from './NoteEditor';
 import './DigestCard.css';
 
 interface Props {
   card: DigestCardType;
   rank: number;
   onOpen: (card: DigestCardType) => void;
+  collections: Collection[];
+  onTogglePin: (card: DigestCardType) => void;
+  onToggleHide: (card: DigestCardType) => void;
+  onToggleCollection: (card: DigestCardType, collectionId: number, makeMember: boolean) => void;
+  onCreateCollection: (title: string) => Promise<Collection | null>;
+  onSaveNote: (card: DigestCardType, body: string) => void;
+  selectable?: boolean;
+  selected?: boolean;
+  onToggleSelect?: (card: DigestCardType) => void;
+  /** When rendered inside a collection view, enables a one-click remove. */
+  onRemoveFromCollection?: (card: DigestCardType) => void;
 }
 
 const PLATFORM_LABELS: Record<string, string> = {
@@ -44,10 +58,25 @@ function timeAgo(iso: string): string {
   return `${Math.floor(d / 30)}mo`;
 }
 
-export function DigestCard({ card, rank, onOpen }: Props) {
+export function DigestCard({
+  card,
+  rank,
+  onOpen,
+  collections,
+  onTogglePin,
+  onToggleHide,
+  onToggleCollection,
+  onCreateCollection,
+  onSaveNote,
+  selectable = false,
+  selected = false,
+  onToggleSelect,
+  onRemoveFromCollection,
+}: Props) {
   const platformLabel = PLATFORM_LABELS[card.platform] ?? card.platform;
   const rankStr = `#${String(rank).padStart(3, '0')}`;
   const degraded = card.sort_used !== card.sort_requested;
+  const [saveOpen, setSaveOpen] = useState(false);
 
   // Prefer the resolved thumbnail URL; fall back to thumbnail_path
   const thumbnailSrc = card.thumbnail
@@ -57,10 +86,11 @@ export function DigestCard({ card, rank, onOpen }: Props) {
 
   const canOpen = card.has_content_bundle || card.has_content;
   const mediaIcon = MEDIA_TYPE_ICONS[card.media_type] ?? '·';
+  const stop = (e: React.MouseEvent) => e.stopPropagation();
 
   return (
     <article
-      className={`digest-card${canOpen ? ' digest-card--clickable' : ''}`}
+      className={`digest-card${canOpen ? ' digest-card--clickable' : ''}${card.pinned ? ' digest-card--pinned' : ''}${selected ? ' digest-card--selected' : ''}`}
       data-platform={card.platform}
       onClick={() => onOpen(card)}
       onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && onOpen(card)}
@@ -76,6 +106,18 @@ export function DigestCard({ card, rank, onOpen }: Props) {
           <div className="card-thumb-placeholder">
             <span>{platformLabel[0]}</span>
           </div>
+        )}
+
+        {/* Selection checkbox (selective refresh) */}
+        {selectable && (
+          <label className="card-select" onClick={stop}>
+            <input
+              type="checkbox"
+              checked={selected}
+              onChange={() => onToggleSelect?.(card)}
+              aria-label="Select for refresh"
+            />
+          </label>
         )}
 
         {/* Rank chip — the specimen label */}
@@ -97,6 +139,59 @@ export function DigestCard({ card, rank, onOpen }: Props) {
             ◉
           </span>
         )}
+
+        {/* Hover action bar */}
+        <div className="card-actions" onClick={stop}>
+          <button
+            type="button"
+            className={`card-action${card.pinned ? ' card-action--on' : ''}`}
+            onClick={() => onTogglePin(card)}
+            title={card.pinned ? 'Pinned — stays across refresh' : 'Pin (keep across refresh)'}
+            aria-pressed={card.pinned}
+          >
+            📌
+          </button>
+          <div className="card-action-wrap">
+            <button
+              type="button"
+              className={`card-action${(card.collection_ids?.length ?? 0) > 0 ? ' card-action--on' : ''}`}
+              onClick={() => setSaveOpen((v) => !v)}
+              title="Save to collection"
+              aria-pressed={(card.collection_ids?.length ?? 0) > 0}
+            >
+              🔖
+            </button>
+            {saveOpen && (
+              <SaveMenu
+                collections={collections}
+                memberIds={card.collection_ids ?? []}
+                onToggle={(cid, makeMember) => onToggleCollection(card, cid, makeMember)}
+                onCreate={onCreateCollection}
+                onClose={() => setSaveOpen(false)}
+              />
+            )}
+          </div>
+          {onRemoveFromCollection ? (
+            <button
+              type="button"
+              className="card-action card-action--danger"
+              onClick={() => onRemoveFromCollection(card)}
+              title="Remove from this collection"
+            >
+              ✕
+            </button>
+          ) : (
+            <button
+              type="button"
+              className={`card-action${card.hidden ? ' card-action--on' : ''}`}
+              onClick={() => onToggleHide(card)}
+              title={card.hidden ? 'Hidden — won’t appear in digest' : 'Hide (don’t show me this)'}
+              aria-pressed={card.hidden}
+            >
+              🚫
+            </button>
+          )}
+        </div>
       </div>
 
       <div className="card-body">
@@ -180,6 +275,13 @@ export function DigestCard({ card, rank, onOpen }: Props) {
             </span>
           </div>
         </div>
+
+        {/* Note — global per post, shown everywhere */}
+        <NoteEditor
+          value={card.note}
+          compact
+          onSave={(body) => onSaveNote(card, body)}
+        />
       </div>
     </article>
   );

@@ -58,6 +58,12 @@ export interface DigestCard {
   /** True if a full Content Bundle (media + caption + sound) exists */
   has_content_bundle: boolean;
   sort_availability: SortAvailability;
+
+  // User state (collections / notes / refresh)
+  note?: string | null;
+  hidden?: boolean;
+  pinned?: boolean;
+  collection_ids?: number[];
 }
 
 export interface DigestResponse {
@@ -92,6 +98,8 @@ export interface DigestFilters {
   period: number;
   sort: SortKey;
   limit: number;
+  /** When true, only show never-served posts (+ pinned) — the hard-refresh working set */
+  unseen_only?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -140,4 +148,44 @@ export interface ContentBundle {
   rank: number | null;
   score: number | null;
   sort_used: string | null;
+
+  // User state
+  note?: string | null;
+  hidden?: boolean;
+  pinned?: boolean;
+  collection_ids?: number[];
+}
+
+// ---------------------------------------------------------------------------
+// Collections
+// ---------------------------------------------------------------------------
+
+export interface Collection {
+  id: number;
+  title: string;
+  description: string | null;
+  item_count: number;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface CollectionDetail extends Collection {
+  cards: DigestCard[];
+}
+
+// ---------------------------------------------------------------------------
+// Refresh
+// ---------------------------------------------------------------------------
+
+export type RefreshSource = 'corpus' | 'live';
+
+export interface HardRefreshRequest {
+  source: RefreshSource;
+  serve_ids: [string, string][];
+  platform?: string | null;
+  geo?: string | null;
+  period?: number;
+  sort?: SortKey;
+  limit?: number;
+  live_per_platform?: number;
 }

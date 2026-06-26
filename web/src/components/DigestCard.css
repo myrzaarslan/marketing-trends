@@ -270,3 +270,73 @@
   font-family: var(--font-mono);
   color: var(--text-lo);
 }
+
+/* ── Pinned / selected states ───────────────────────────────────────────── */
+
+.digest-card--pinned {
+  border-color: var(--amber-dim);
+  box-shadow: inset 0 2px 0 var(--amber);
+}
+
+.digest-card--selected {
+  border-color: var(--amber);
+  box-shadow: 0 0 0 2px var(--amber);
+}
+
+/* ── Selection checkbox ─────────────────────────────────────────────────── */
+
+.card-select {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 6;
+  display: flex;
+  background: rgba(0, 0, 0, 0.55);
+  border-radius: 5px;
+  padding: 3px;
+  cursor: pointer;
+}
+
+.card-select input { width: 16px; height: 16px; cursor: pointer; accent-color: var(--amber); }
+
+/* ── Hover action bar ───────────────────────────────────────────────────── */
+
+.card-actions {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 6;
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+
+.digest-card:hover .card-actions,
+.digest-card:focus-within .card-actions { opacity: 1; }
+
+.card-action-wrap { position: relative; }
+
+.card-action {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.6);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  backdrop-filter: blur(2px);
+}
+
+.card-action:hover { background: rgba(0, 0, 0, 0.85); border-color: var(--amber-dim); }
+.card-action--on { border-color: var(--amber); box-shadow: 0 0 0 1px var(--amber); }
+.card-action--danger:hover { border-color: #e0556b; box-shadow: 0 0 0 1px #e0556b; }
+
+/* ── Note slot ──────────────────────────────────────────────────────────── */
+
+.card-body .note-display,
+.card-body .note-editor { margin-top: 8px; }

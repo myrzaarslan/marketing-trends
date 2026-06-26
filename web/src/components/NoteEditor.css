@@ -1,0 +1,43 @@
+.note-display {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px dashed var(--border);
+  color: var(--text-mid);
+  font-size: 12px;
+  cursor: text;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.note-display:hover { border-color: var(--amber); }
+
+.note-display--has {
+  border-style: solid;
+  border-color: rgba(214, 178, 90, 0.4);
+  background: rgba(214, 178, 90, 0.08);
+  color: var(--text-hi);
+}
+
+.note-icon { color: #d6b25a; line-height: 1.4; }
+.note-text { line-height: 1.4; white-space: pre-wrap; word-break: break-word; }
+.note-placeholder { font-style: italic; }
+
+.note-display--compact { padding: 4px 6px; font-size: 11px; }
+
+.note-textarea {
+  width: 100%;
+  min-height: 56px;
+  resize: vertical;
+  background: var(--ink);
+  border: 1px solid var(--amber);
+  border-radius: 6px;
+  color: var(--text-hi);
+  padding: 7px 8px;
+  font-size: 13px;
+  font-family: inherit;
+  line-height: 1.4;
+}
+
+.note-editor--compact .note-textarea { min-height: 44px; font-size: 12px; }

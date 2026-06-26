@@ -26,8 +26,8 @@ _ROOT = Path(__file__).parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from core.schema import PostRecord
-from core.storage import get_session, init_db, set_thumbnail_path, upsert_post
+from core.schema import PostRecord, WatchedAccount
+from core.storage import Account, Post, get_session, init_db, set_thumbnail_path, upsert_post
 from core import ranker as _ranker
 
 # ---------------------------------------------------------------------------
@@ -478,6 +478,126 @@ def run_ingestion(
         summary["enrichment"] = _call_enrichment(ids)
 
     print("[ingest] run_ingestion() complete")
+    return summary
+
+
+# ---------------------------------------------------------------------------
+# Live harvest — pull BRAND-NEW posts from the adapters (hard-refresh "live")
+# ---------------------------------------------------------------------------
+
+# Small fallback seed sets used only when the DB watchlist is empty for a
+# platform. Kept tiny on purpose — live harvest is the expensive path.
+_FALLBACK_SEEDS: dict[str, list[str]] = {
+    "x": ["NASA", "OpenAI", "Google", "nytimes"],
+    "threads": ["zuck", "mosseri", "natgeo", "nasa"],
+    "instagram": [],  # IG needs a logged-in instagrapi session — skip unless watchlisted
+    "tiktok": [],      # TikTok uses discovery (fetch_viral_posts), no account list needed
+}
+
+
+def _watchlist_handles(session, platform: str) -> list[str]:
+    """Watchlist handles for a platform from the DB, else the small fallback seeds."""
+    rows = (
+        session.query(Account.handle)
+        .filter_by(platform=platform, on_watchlist=True)
+        .all()
+    )
+    handles = [r[0] for r in rows]
+    return handles or _FALLBACK_SEEDS.get(platform, [])
+
+
+def _make_adapter(platform: str):
+    """Lazily construct a platform adapter (imports are heavy/optional)."""
+    if platform == "x":
+        from adapters.x import XAdapter
+        return XAdapter()
+    if platform == "threads":
+        from adapters.threads import ThreadsAdapter
+        return ThreadsAdapter(headless=True)
+    if platform == "tiktok":
+        from adapters.tiktok import TikTokAdapter
+        return TikTokAdapter()
+    if platform == "instagram":
+        from adapters.instagram import InstagramAdapter
+        return InstagramAdapter()
+    raise ValueError(f"unknown platform {platform!r}")
+
+
+def harvest_live(
+    *,
+    platforms: Optional[list[str]] = None,
+    per_platform: int = 12,
+    geo_tier: str = "World",
+) -> dict:
+    """Pull brand-new posts from the live adapters (the hard-refresh "live" source).
+
+    Best-effort and bounded: each platform is wrapped so one failure (browser
+    missing, session expired, rate-limit) never sinks the others. New posts are
+    upserted via core.storage; the caller then ranks + enriches as usual.
+
+    - x:        auth-free syndication (most reliable).
+    - threads:  Playwright profile harvest of seed handles.
+    - tiktok:   Explore/FYP discovery (no account list needed).
+    - instagram: only if watchlisted (needs an instagrapi session) — else skipped.
+    """
+    init_db()
+    platforms = platforms or ["x", "threads", "tiktok", "instagram"]
+    session = get_session()
+    summary: dict[str, dict] = {}
+    try:
+        for plat in platforms:
+            result = {"fetched": 0, "new": 0, "error": None}
+            try:
+                adapter = _make_adapter(plat)
+
+                records: list[PostRecord] = []
+                if plat == "tiktok":
+                    # Discovery surface — brand-new viral posts, no account needed.
+                    try:
+                        records = adapter.fetch_viral_posts(geo_tier="KZ", period_days=7)
+                    except NotImplementedError:
+                        records = []
+                else:
+                    handles = _watchlist_handles(session, plat)
+                    for handle in handles:
+                        if result["fetched"] >= per_platform:
+                            break
+                        acct = WatchedAccount(
+                            handle=handle,
+                            platform=plat,
+                            segment="adjacent",
+                            geo_tier=geo_tier,
+                        )
+                        try:
+                            got = adapter.fetch_account_posts(acct, limit=max(5, per_platform // 2))
+                        except Exception as exc:  # one account failing is non-fatal
+                            print(f"[live] {plat}@{handle}: {type(exc).__name__}: {str(exc)[:120]}")
+                            continue
+                        records.extend(got)
+                        result["fetched"] += len(got)
+
+                # Upsert (cap new rows at per_platform to bound work)
+                new_count = 0
+                for rec in records:
+                    if new_count >= per_platform:
+                        break
+                    if not rec.raw:  # never persist an empty-raw hole
+                        continue
+                    is_new = session.get(Post, (rec.platform, rec.platform_post_id)) is None
+                    upsert_post(session, rec, source=f"live_{plat}")
+                    if is_new:
+                        new_count += 1
+                session.commit()
+                result["fetched"] = result["fetched"] or len(records)
+                result["new"] = new_count
+            except Exception as exc:
+                session.rollback()
+                result["error"] = f"{type(exc).__name__}: {str(exc)[:160]}"
+                print(f"[live] {plat} harvest failed (non-fatal): {result['error']}")
+            summary[plat] = result
+    finally:
+        session.close()
+    print(f"[live] harvest summary: {summary}")
     return summary
 
 

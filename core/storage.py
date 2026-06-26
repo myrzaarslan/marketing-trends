@@ -21,6 +21,7 @@ from sqlalchemy import (
     Column,
     DateTime,
     Float,
+    ForeignKey,
     ForeignKeyConstraint,
     Index,
     Integer,
@@ -199,6 +200,101 @@ class PostContent(Base):
             ["posts.platform", "posts.platform_post_id"],
             ondelete="CASCADE",
         ),
+    )
+
+
+def _utcnow_naive() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+class Collection(Base):
+    """A user-curated, named set of posts (title + description)."""
+
+    __tablename__ = "collections"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    title = Column(String(200), nullable=False)
+    description = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=_utcnow_naive)
+    updated_at = Column(DateTime, nullable=False, default=_utcnow_naive, onupdate=_utcnow_naive)
+
+
+class CollectionItem(Base):
+    """Membership of a post in a Collection (M:N posts <-> collections)."""
+
+    __tablename__ = "collection_items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    collection_id = Column(
+        Integer,
+        ForeignKey("collections.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    platform = Column(String(32), nullable=False)
+    platform_post_id = Column(String(128), nullable=False)
+    added_at = Column(DateTime, nullable=False, default=_utcnow_naive)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "collection_id", "platform", "platform_post_id",
+            name="uq_collection_item",
+        ),
+        ForeignKeyConstraint(
+            ["platform", "platform_post_id"],
+            ["posts.platform", "posts.platform_post_id"],
+            ondelete="CASCADE",
+        ),
+        Index("ix_collection_items_post", "platform", "platform_post_id"),
+    )
+
+
+class PostNote(Base):
+    """A single editable free-text note per post, shown everywhere the post appears."""
+
+    __tablename__ = "post_notes"
+
+    platform = Column(String(32), primary_key=True, nullable=False)
+    platform_post_id = Column(String(128), primary_key=True, nullable=False)
+    body = Column(Text, nullable=False, default="")
+    updated_at = Column(DateTime, nullable=False, default=_utcnow_naive, onupdate=_utcnow_naive)
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["platform", "platform_post_id"],
+            ["posts.platform", "posts.platform_post_id"],
+            ondelete="CASCADE",
+        ),
+    )
+
+
+class PostFlag(Base):
+    """Per-post user state that drives refresh: hidden, pinned, and last-served time.
+
+    - hidden:        never show this post again (global, all lists).
+    - pinned:        keep this post across a hard refresh (it survives the swap).
+    - last_served_at: when this post was last shown in a digest — lets hard refresh
+                      return previously-unseen posts and recycle least-recently-seen
+                      ones once the unseen pool is exhausted.
+    """
+
+    __tablename__ = "post_flags"
+
+    platform = Column(String(32), primary_key=True, nullable=False)
+    platform_post_id = Column(String(128), primary_key=True, nullable=False)
+    hidden = Column(Boolean, nullable=False, default=False)
+    pinned = Column(Boolean, nullable=False, default=False)
+    last_served_at = Column(DateTime, nullable=True)
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["platform", "platform_post_id"],
+            ["posts.platform", "posts.platform_post_id"],
+            ondelete="CASCADE",
+        ),
+        Index("ix_post_flags_hidden", "hidden"),
+        Index("ix_post_flags_pinned", "pinned"),
+        Index("ix_post_flags_served", "last_served_at"),
     )
 
 
@@ -399,3 +495,240 @@ def count_distinct_snapshot_days(
     )
     days = {r[0].date() if isinstance(r[0], datetime) else r[0] for r in rows}
     return len(days)
+
+
+# ---------------------------------------------------------------------------
+# Collections
+# ---------------------------------------------------------------------------
+
+
+def create_collection(session: Session, title: str, description: str | None = None) -> Collection:
+    coll = Collection(title=title.strip() or "Untitled", description=description)
+    session.add(coll)
+    session.flush()
+    return coll
+
+
+def list_collections(session: Session) -> list[tuple[Collection, int]]:
+    """All collections with their item counts, newest first."""
+    colls = session.query(Collection).order_by(Collection.created_at.desc()).all()
+    out: list[tuple[Collection, int]] = []
+    for c in colls:
+        count = (
+            session.query(CollectionItem)
+            .filter_by(collection_id=c.id)
+            .count()
+        )
+        out.append((c, count))
+    return out
+
+
+def update_collection(
+    session: Session, collection_id: int, *, title: str | None = None, description: str | None = None
+) -> Collection | None:
+    coll = session.get(Collection, collection_id)
+    if coll is None:
+        return None
+    if title is not None:
+        coll.title = title.strip() or coll.title
+    if description is not None:
+        coll.description = description
+    return coll
+
+
+def delete_collection(session: Session, collection_id: int) -> bool:
+    coll = session.get(Collection, collection_id)
+    if coll is None:
+        return False
+    # Items are removed via ON DELETE CASCADE, but SQLite needs the rows gone
+    # explicitly when the FK action isn't honored for ORM-loaded objects.
+    session.query(CollectionItem).filter_by(collection_id=collection_id).delete()
+    session.delete(coll)
+    return True
+
+
+def add_to_collection(
+    session: Session, collection_id: int, platform: str, platform_post_id: str
+) -> bool:
+    """Add a post to a collection. Idempotent — returns True if newly added."""
+    existing = (
+        session.query(CollectionItem)
+        .filter_by(collection_id=collection_id, platform=platform, platform_post_id=platform_post_id)
+        .first()
+    )
+    if existing is not None:
+        return False
+    session.add(
+        CollectionItem(
+            collection_id=collection_id,
+            platform=platform,
+            platform_post_id=platform_post_id,
+        )
+    )
+    return True
+
+
+def remove_from_collection(
+    session: Session, collection_id: int, platform: str, platform_post_id: str
+) -> bool:
+    n = (
+        session.query(CollectionItem)
+        .filter_by(collection_id=collection_id, platform=platform, platform_post_id=platform_post_id)
+        .delete()
+    )
+    return n > 0
+
+
+def collection_post_ids(session: Session, collection_id: int) -> list[tuple[str, str]]:
+    """(platform, post_id) for a collection, most-recently-added first."""
+    rows = (
+        session.query(CollectionItem.platform, CollectionItem.platform_post_id)
+        .filter_by(collection_id=collection_id)
+        .order_by(CollectionItem.added_at.desc())
+        .all()
+    )
+    return [(r[0], r[1]) for r in rows]
+
+
+def collection_ids_for_post(session: Session, platform: str, platform_post_id: str) -> list[int]:
+    rows = (
+        session.query(CollectionItem.collection_id)
+        .filter_by(platform=platform, platform_post_id=platform_post_id)
+        .all()
+    )
+    return [r[0] for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Notes (one editable note per post)
+# ---------------------------------------------------------------------------
+
+
+def set_note(session: Session, platform: str, platform_post_id: str, body: str) -> None:
+    """Upsert a post's note. An empty/blank body deletes the note."""
+    existing = session.get(PostNote, (platform, platform_post_id))
+    if not body or not body.strip():
+        if existing is not None:
+            session.delete(existing)
+        return
+    if existing is None:
+        session.add(PostNote(platform=platform, platform_post_id=platform_post_id, body=body))
+    else:
+        existing.body = body
+
+
+def get_note(session: Session, platform: str, platform_post_id: str) -> str | None:
+    note = session.get(PostNote, (platform, platform_post_id))
+    return note.body if note else None
+
+
+def notes_for(session: Session, ids: list[tuple[str, str]]) -> dict[tuple[str, str], str]:
+    """Bulk-fetch notes for a set of (platform, post_id) pairs."""
+    if not ids:
+        return {}
+    platforms = {p for p, _ in ids}
+    rows = session.query(PostNote).filter(PostNote.platform.in_(platforms)).all()
+    wanted = set(ids)
+    return {
+        (r.platform, r.platform_post_id): r.body
+        for r in rows
+        if (r.platform, r.platform_post_id) in wanted
+    }
+
+
+# ---------------------------------------------------------------------------
+# Flags (hidden / pinned / seen) — drive refresh
+# ---------------------------------------------------------------------------
+
+
+def _get_or_create_flag(session: Session, platform: str, platform_post_id: str) -> PostFlag:
+    flag = session.get(PostFlag, (platform, platform_post_id))
+    if flag is None:
+        flag = PostFlag(platform=platform, platform_post_id=platform_post_id)
+        session.add(flag)
+        session.flush()
+    return flag
+
+
+def set_hidden(session: Session, platform: str, platform_post_id: str, hidden: bool) -> None:
+    _get_or_create_flag(session, platform, platform_post_id).hidden = hidden
+
+
+def set_pinned(session: Session, platform: str, platform_post_id: str, pinned: bool) -> None:
+    _get_or_create_flag(session, platform, platform_post_id).pinned = pinned
+
+
+def mark_served(session: Session, ids: list[tuple[str, str]]) -> None:
+    """Stamp last_served_at=now for each post (used by hard refresh seen-tracking)."""
+    now = _utcnow_naive()
+    for platform, post_id in ids:
+        _get_or_create_flag(session, platform, post_id).last_served_at = now
+
+
+def flag_ids(session: Session, *, hidden: bool | None = None, pinned: bool | None = None) -> set[tuple[str, str]]:
+    """Set of (platform, post_id) matching the given hidden/pinned filters."""
+    q = session.query(PostFlag.platform, PostFlag.platform_post_id)
+    if hidden is not None:
+        q = q.filter(PostFlag.hidden == hidden)
+    if pinned is not None:
+        q = q.filter(PostFlag.pinned == pinned)
+    return {(r[0], r[1]) for r in q.all()}
+
+
+def served_ids(session: Session) -> set[tuple[str, str]]:
+    """Posts that have been shown at least once (last_served_at set)."""
+    rows = (
+        session.query(PostFlag.platform, PostFlag.platform_post_id)
+        .filter(PostFlag.last_served_at.isnot(None))
+        .all()
+    )
+    return {(r[0], r[1]) for r in rows}
+
+
+def count_unseen_eligible(
+    session: Session, *, exclude_hidden: bool = True
+) -> int:
+    """How many posts have never been served (and aren't hidden)."""
+    served = served_ids(session)
+    hidden = flag_ids(session, hidden=True) if exclude_hidden else set()
+    blocked = served | hidden
+    total = session.query(Post.platform, Post.platform_post_id).all()
+    return sum(1 for r in total if (r[0], r[1]) not in blocked)
+
+
+def recycle_oldest_served(session: Session, count: int) -> int:
+    """Reset last_served_at=NULL for the `count` least-recently-served posts.
+
+    Lets hard refresh keep producing content once the unseen pool is exhausted —
+    the oldest-seen posts become 'unseen' again. Returns how many were recycled.
+    """
+    if count <= 0:
+        return 0
+    rows = (
+        session.query(PostFlag)
+        .filter(PostFlag.last_served_at.isnot(None))
+        .order_by(PostFlag.last_served_at.asc())
+        .limit(count)
+        .all()
+    )
+    for r in rows:
+        r.last_served_at = None
+    return len(rows)
+
+
+def flags_for(session: Session, ids: list[tuple[str, str]]) -> dict[tuple[str, str], dict]:
+    """Bulk-fetch {hidden, pinned, last_served_at} for a set of posts."""
+    if not ids:
+        return {}
+    platforms = {p for p, _ in ids}
+    rows = session.query(PostFlag).filter(PostFlag.platform.in_(platforms)).all()
+    wanted = set(ids)
+    return {
+        (r.platform, r.platform_post_id): {
+            "hidden": bool(r.hidden),
+            "pinned": bool(r.pinned),
+            "last_served_at": r.last_served_at.isoformat() if r.last_served_at else None,
+        }
+        for r in rows
+        if (r.platform, r.platform_post_id) in wanted
+    }
