@@ -1,0 +1,26 @@
+# TikTok adapter dependencies (account-posts path). The trends path is stdlib-only.
+#
+# PRIMARY account-posts path: TikTok-Api runs TikTok's own signer JS in a
+# Playwright browser to call the signed item_list endpoint. Pin it — the signer
+# and endpoint shapes change often (ADR-0001 accepts this fragility). After a
+# bump, re-run `python -m adapters.tiktok.adapter` and confirm sound_id/save_count
+# still populate. Playwright + a headed Chromium are required (see README):
+#   pip install -r adapters/tiktok/requirements.txt
+#   playwright install chromium
+TikTokApi==7.3.3
+playwright>=1.40
+
+# fetch_viral_posts (logged-out For-You discovery harvest, discovery.py) drives a
+# headed Playwright browser directly and applies a stealth fingerprint so the
+# headed browser isn't flagged. Stealth is best-effort (the harvest degrades
+# gracefully without it), but recommended.
+playwright-stealth>=2.0
+
+# FALLBACK account-posts path: yt-dlp flat-playlist (lighter, no browser, thinner
+# data). Also pinned — yt-dlp's TikTok extractor changes often.
+yt-dlp==2026.6.9
+
+# curl_cffi gives yt-dlp browser TLS impersonation. Without it you get a
+# "no impersonate target available" warning and more frequent blocks from a
+# home IP. Strongly recommended, not strictly required.
+curl_cffi>=0.7

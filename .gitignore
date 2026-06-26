@@ -1,0 +1,29 @@
+# Secrets & local state — NEVER commit
+secrets/
+*.env
+ig_burner.json
+
+# per-persona browser profiles (isolation harness)
+profiles/
+
+# SQLite / harvested data / downloaded media / generated registries
+data/
+*.db
+*.sqlite3
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Node / frontend build
+node_modules/
+web/dist/
+web/node_modules/
+
+# Scratch / debug artifacts
+*.log
+*.tmp
+flat1.json
+full1.json
+vid.json

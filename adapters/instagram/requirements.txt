@@ -1,0 +1,7 @@
+# Instagram adapter deps. $0 / open-source only (ADR-0001).
+# Round two: instagrapi (mobile private API) replaces instaloader (web scraping).
+# See docs/REVERSE-ENGINEERING.md. Pin hard — IG ships breaking changes and a
+# matching instagrapi release usually follows; bump deliberately, never blindly.
+instagrapi==2.16.25
+# pydantic is instagrapi's data layer; pinned via its own constraint, listed for clarity.
+pydantic>=2.12.5,<2.14

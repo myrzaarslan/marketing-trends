@@ -1,0 +1,8 @@
+# Persona-isolation browser harness deps. $0 / open-source only (ADR-0001).
+# Shared infra: TikTok-persona and Threads import core.harness; IG does not (HTTP).
+playwright==1.60.0
+playwright-stealth==2.0.3
+# After installing, fetch a browser engine once:
+#   playwright install chromium
+# Real Chrome (channel="chrome") is used if present; otherwise the harness falls
+# back to bundled Chromium automatically.
