@@ -115,6 +115,24 @@ Two env-var alternatives exist if you prefer not to use the file: `IG_SESSIONID`
 > channel, never commit it, and expect to refresh it periodically (sessions
 > expire, and reusing one across many IPs can trip Instagram's checks).
 
+### Sessions expire — and can self-heal
+
+A `sessionid` doesn't last forever; Instagram invalidates it on password change,
+logout, or a security checkpoint. When that happens IG harvest is simply skipped
+(other platforms keep working).
+
+If burner **credentials** are available — `IG_USERNAME`/`IG_PASSWORD` or a
+`secrets/ig_burner.env` file — the app will **auto-relogin** when it detects an
+expired session, then write the refreshed session back to
+`secrets/ig_browser_session.json` automatically.
+
+**You usually only want credentials on your own machine.** A password relogin from
+an unfamiliar IP typically triggers a checkpoint (email/SMS code) that only the
+account owner can clear — so auto-relogin reliably works only on the trusted IP
+where the session was minted. Do **not** broadcast the password to teammates;
+instead, send them a fresh `secrets/ig_browser_session.json` when their copy dies
+(your node can regenerate it automatically). Give heavy users their own burner.
+
 ---
 
 ## Troubleshooting

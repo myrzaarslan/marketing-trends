@@ -626,21 +626,113 @@ def _make_adapter(platform: str, *, ig_hydrate_views: bool = False):
     raise ValueError(f"unknown platform {platform!r}")
 
 
+_SECRETS_DIR = _ROOT / "secrets"
+_IG_SESSION_FILE = _SECRETS_DIR / "ig_browser_session.json"
+_IG_BURNER_ENV = _SECRETS_DIR / "ig_burner.env"
+
+
+def _ig_settings_file() -> str:
+    """Path to the durable instagrapi settings (device + auth) file.
+
+    Defaults under secrets/ so a self-heal relogin persists a STABLE device
+    fingerprint across runs (reusing the same emulated phone is far less
+    challenge-prone than a fresh device every time)."""
+    return os.environ.get("IG_SETTINGS_FILE") or str(_SECRETS_DIR / "ig_settings.json")
+
+
+def _load_ig_credentials() -> tuple[Optional[str], Optional[str]]:
+    """Burner username/password from env, falling back to secrets/ig_burner.env.
+
+    These are ONLY needed for self-heal (auto-relogin when the session lapses).
+    A bare sessionid can't regenerate itself, so without credentials a dead
+    session means 'skip Instagram until someone re-mints it'."""
+    user = os.environ.get("IG_USERNAME")
+    pw = os.environ.get("IG_PASSWORD")
+    if user and pw:
+        return user, pw
+    if _IG_BURNER_ENV.exists():
+        try:
+            kv: dict[str, str] = {}
+            for line in _IG_BURNER_ENV.read_text().splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                kv[k.strip()] = v.strip().strip('"').strip("'")
+            return (user or kv.get("IG_USERNAME"), pw or kv.get("IG_PASSWORD"))
+        except OSError:
+            pass
+    return user, pw
+
+
+def _read_sessionid() -> Optional[str]:
+    """sessionid from env or secrets/ig_browser_session.json."""
+    sessionid = os.environ.get("IG_SESSIONID")
+    if sessionid:
+        return sessionid
+    if _IG_SESSION_FILE.exists():
+        try:
+            return json.loads(_IG_SESSION_FILE.read_text()).get("sessionid")
+        except (json.JSONDecodeError, OSError):
+            return None
+    return None
+
+
+def _persist_ig_session(cl) -> None:
+    """Write the client's CURRENT sessionid back to the drop-in file so the next
+    run starts from the freshly-relogged-in cookie (keeps the file teammates
+    receive the canonical source of truth)."""
+    try:
+        sid = cl.sessionid
+    except Exception:
+        return
+    if not sid:
+        return
+    try:
+        _SECRETS_DIR.mkdir(parents=True, exist_ok=True)
+        _IG_SESSION_FILE.write_text(
+            json.dumps({"sessionid": sid, "ds_user_id": str(getattr(cl, "user_id", "") or "")})
+        )
+    except OSError as exc:
+        print(f"[ingest] could not persist refreshed IG session (non-fatal): {exc}")
+
+
+def _ig_session_is_valid(cl) -> bool:
+    """Cheap authenticated probe — True if the session still works.
+
+    Distinguishes a dead session (LoginRequired → heal) from transient trouble
+    (network/backoff → leave alone, don't trigger a needless relogin storm)."""
+    from instagrapi.exceptions import LoginRequired
+
+    try:
+        cl.account_info()
+        return True
+    except LoginRequired:
+        return False
+    except Exception:
+        # Not an auth problem (rate-limit, network, etc.) — assume still logged in
+        # and let the real harvest call surface/handle it.
+        return True
+
+
 def _make_instagram_adapter(*, hydrate_views: bool = False):
-    """Build a LOGGED-IN Instagram adapter from the burner session.
+    """Build a LOGGED-IN, SELF-HEALING Instagram adapter from the burner session.
 
     IG's mobile private API rejects anonymous callers, so we must authenticate.
     Auth sources, in order of preference:
-      1. IG_SETTINGS_FILE  — a warmed instagrapi session (device + auth); best.
-      2. IG_SESSIONID      — a raw sessionid cookie.
-      3. secrets/ig_browser_session.json — the {"sessionid": ...} minted by the
-         browser login flow (scratch_login_harvest.py).
+      1. IG_SETTINGS_FILE / secrets/ig_settings.json — a warmed instagrapi session
+         (device + auth); best, and what self-heal writes back to.
+      2. IG_SESSIONID / secrets/ig_browser_session.json — a raw sessionid cookie.
+
+    Self-heal: the chosen session is probed once; if it has EXPIRED and burner
+    credentials are available (IG_USERNAME/IG_PASSWORD or secrets/ig_burner.env),
+    we relogin with the persisted device fingerprint and write the refreshed
+    session back to disk. Without credentials (or if relogin hits a checkpoint),
+    we raise so the caller skips Instagram — the other platforms are unaffected.
+
     The Client is pinned to the KZ / ru-RU locale the burner was warmed under so
     the device fingerprint stays consistent (a mismatch is challenge-bait), and
     instagrapi's per-request delay is kept slow (4–9s) per the adapter README.
-
-    Raises RuntimeError if no auth source exists — the caller decides whether that
-    is fatal (single-post resnapshot) or just skip-this-platform (harvest_live).
     """
     from instagrapi import Client
     from adapters.instagram import InstagramAdapter
@@ -654,27 +746,47 @@ def _make_instagram_adapter(*, hydrate_views: bool = False):
     cl.set_timezone_offset(5 * 3600)
     cl.delay_range = [4.0, 9.0]
 
-    settings_file = os.environ.get("IG_SETTINGS_FILE")
-    if settings_file:
-        return InstagramAdapter(client=cl, hydrate_views=hydrate_views).load_session(settings_file)
+    settings_file = _ig_settings_file()
+    adapter = InstagramAdapter(client=cl, hydrate_views=hydrate_views)
 
-    sessionid = os.environ.get("IG_SESSIONID")
-    if not sessionid:
-        sess_path = _ROOT / "secrets" / "ig_browser_session.json"
-        if sess_path.exists():
-            try:
-                sessionid = json.loads(sess_path.read_text()).get("sessionid")
-            except (json.JSONDecodeError, OSError):
-                sessionid = None
+    # 1) Establish a session from the best available source.
+    established = False
+    if os.path.exists(settings_file):
+        adapter.load_session(settings_file)
+        established = True
+    else:
+        sessionid = _read_sessionid()
+        if sessionid:
+            cl.login_by_sessionid(sessionid)
+            established = True
 
-    if sessionid:
-        cl.login_by_sessionid(sessionid)
-        return InstagramAdapter(client=cl, hydrate_views=hydrate_views)
+    # 2) Probe it; self-heal if it's expired.
+    if established and _ig_session_is_valid(cl):
+        return adapter
 
-    raise RuntimeError(
-        "Instagram needs a burner session: set IG_SETTINGS_FILE or IG_SESSIONID, "
-        "or provide secrets/ig_browser_session.json (see adapters/instagram/README.md)."
-    )
+    user, pw = _load_ig_credentials()
+    if not user or not pw:
+        raise RuntimeError(
+            "Instagram session missing or expired and no burner credentials to "
+            "self-heal. Provide a fresh secrets/ig_browser_session.json, or set "
+            "IG_USERNAME/IG_PASSWORD (or secrets/ig_burner.env) to enable "
+            "auto-relogin. (See docs/DEPLOY.md.)"
+        )
+
+    # Relogin reuses the device in settings_file (if any) and dumps the refreshed
+    # session back to it; then mirror the new sessionid into the drop-in file.
+    print("[ingest] Instagram session expired — attempting auto-relogin…")
+    try:
+        adapter.login(user, pw, settings_file=settings_file)
+    except Exception as exc:
+        raise RuntimeError(
+            "Instagram auto-relogin failed (likely a checkpoint/2FA that needs the "
+            f"account owner): {exc}. Re-mint secrets/ig_browser_session.json "
+            "manually from a trusted IP. (See docs/DEPLOY.md.)"
+        ) from exc
+    _persist_ig_session(cl)
+    print("[ingest] Instagram re-login OK — session refreshed.")
+    return adapter
 
 
 def harvest_instagram_explore(
