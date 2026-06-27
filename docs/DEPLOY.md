@@ -67,12 +67,53 @@ database. Media downloads in the background as you browse.
 > its `media/` folder) into `data/` *before* the first launch, and the app will
 > use it as-is.
 
-## Harvesting needs logins for some platforms
+## Harvesting credentials — only Instagram needs one
 
-X works without login. TikTok, Instagram, and Threads generally need a logged-in
-browser session to harvest reliably. Those sessions live in `profiles/` and
-`secrets/`; set them up once and they persist across restarts. (See
-[`docs/handoffs/robust-harvest.md`](handoffs/robust-harvest.md).)
+Browsing the app needs **no** credentials. Harvesting (filling the corpus) is
+mostly credential-free; the **only** secret that gates a feature is the Instagram
+session:
+
+| Platform   | Login needed? | What to provide                                            |
+| ---------- | ------------- | ---------------------------------------------------------- |
+| X          | No            | Nothing — works anonymously                                |
+| TikTok     | No            | Nothing — anonymous via the bundled browser               |
+| Threads    | No (optional) | Public profiles load unauthenticated from a home IP       |
+| **Instagram** | **Yes**    | A burner **session file** (see below)                     |
+
+Without the Instagram session, IG is simply **skipped** during a live harvest —
+the other three platforms still work.
+
+### Setting up Instagram (drop-in file)
+
+Put a session file at exactly this path (relative to the project folder):
+
+```
+secrets/ig_browser_session.json
+```
+
+with this shape:
+
+```json
+{ "sessionid": "<instagram sessionid cookie>", "ds_user_id": "<numeric user id>" }
+```
+
+Only `sessionid` is required. `secrets/` is a mounted volume, so the file is
+picked up on the next start — **no config or rebuild needed**. A template lives at
+[`secrets/ig_browser_session.json.example`](../secrets/ig_browser_session.json.example);
+copy it to `secrets/ig_browser_session.json` and fill in the value.
+
+> **Receiving the file from a teammate:** save the file they send you to
+> `secrets/ig_browser_session.json` in your project folder, then start (or restart)
+> the app. That's the entire setup.
+
+Two env-var alternatives exist if you prefer not to use the file: `IG_SESSIONID`
+(raw cookie) or `IG_SETTINGS_FILE` (a warmed `instagrapi` session). See
+[`adapters/instagram/README.md`](../adapters/instagram/README.md) and
+[`docs/handoffs/robust-harvest.md`](handoffs/robust-harvest.md).
+
+> ⚠️ A `sessionid` is a live login credential. Share it only over a private
+> channel, never commit it, and expect to refresh it periodically (sessions
+> expire, and reusing one across many IPs can trip Instagram's checks).
 
 ---
 

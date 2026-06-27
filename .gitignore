@@ -1,5 +1,7 @@
 # Secrets & local state — NEVER commit
-secrets/
+# (use secrets/* so we can still track the documented example template below)
+secrets/*
+!secrets/ig_browser_session.json.example
 *.env
 ig_burner.json
 
