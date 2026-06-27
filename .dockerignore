@@ -1,0 +1,34 @@
+# Mutable runtime state — mounted as volumes, must never enter the image
+data/
+profiles/
+secrets/
+*.db
+*.sqlite3
+*.db-shm
+*.db-wal
+
+# Python
+.venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+
+# Node / frontend (rebuilt inside the image)
+web/node_modules/
+web/dist/
+node_modules/
+
+# VCS & docs not needed at runtime
+.git/
+.gitignore
+docs/
+
+# Scratch / debug artifacts
+scratch_*.py
+*.log
+*.tmp
+flat1.json
+full1.json
+vid.json
+tests/

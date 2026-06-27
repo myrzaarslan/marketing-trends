@@ -82,8 +82,15 @@ MIN_BREADTH_SOURCES = 2     # cross_persona needs N distinct vantage points
 HISTORY_GATE_DAYS = 3
 
 TIME_GATED: frozenset[SortKey] = frozenset({"velocity"})
-CORPUS_GATED: frozenset[SortKey] = frozenset({"relative_baseline"})
+# relative_baseline used to be corpus-gated (needed >=3 posts from the account).
+# It now falls back to the platform-wide median when the creator has too few
+# posts, so it always yields a meaningful value — no gate.
+CORPUS_GATED: frozenset[SortKey] = frozenset()
 SOURCE_GATED: frozenset[SortKey] = frozenset({"cross_persona"})
+
+# A creator needs at least this many volume samples before we trust their own
+# median as the baseline; below it we compare against the platform median.
+MIN_ACCOUNT_BASELINE_SAMPLES = 2
 # Union of everything that depends on accumulated data (used by the coarse meta).
 HISTORY_GATED: frozenset[SortKey] = TIME_GATED | CORPUS_GATED | SOURCE_GATED
 
@@ -255,12 +262,36 @@ def _engagement_numerator(snap: PostSnapshot, platform: str) -> Optional[float]:
     return float(total) if has else None
 
 
+def _volume_metric(snap: PostSnapshot, platform: str) -> Optional[float]:
+    """Best available "reach" volume for a post: views where the platform exposes
+    them, otherwise the summed engagement numerator. Lets view-less platforms
+    (Threads, view-less X tweets) still participate in volume-based sorts."""
+    if snap.view_count is not None:
+        return float(snap.view_count)
+    return _engagement_numerator(snap, platform)
+
+
 def _score_engagement_rate(snap: PostSnapshot, platform: str) -> Optional[float]:
+    """Engagement ÷ best-available reach.
+
+    Reach denominator = views if present, else follower count. Normalizing by
+    followers is what de-biases huge accounts: a 669M-follower post with 13M likes
+    scores ~0.02, while a 1.4M-follower post with 560K likes scores ~0.40 — so
+    breakout content from smaller creators outranks celebrities instead of celebs
+    winning on raw counts. Only when neither views nor followers exist (rare) do we
+    fall back to the raw engagement sum, and only on structurally view-less
+    platforms; otherwise the post sinks. Scales are only ever compared within one
+    platform (the digest is filtered/interleaved per platform)."""
     num = _engagement_numerator(snap, platform)
+    if num is None:
+        return None
+    if snap.view_count is not None:
+        return _safe_div(num, snap.view_count)
+    if snap.author_follower_count:
+        return _safe_div(num, snap.author_follower_count)
     if platform in NO_VIEW_PLATFORMS:
-        # No view count → just use raw numerator as proxy
         return num
-    return _safe_div(num, snap.view_count)
+    return None  # no reach denominator available → sinks
 
 
 def _score_engagement_rate_followers(snap: PostSnapshot, platform: str) -> Optional[float]:
@@ -279,13 +310,19 @@ def _score_raw_counts(snap: PostSnapshot, platform: str) -> Optional[float]:
 
 
 def _score_share_rate(snap: PostSnapshot, platform: str) -> Optional[float]:
-    if platform in ("instagram",):
+    # Genuinely absent on Instagram (no public share count) — nothing to compute.
+    if snap.share_count is None:
         return None
-    return _safe_div(snap.share_count, snap.view_count)
+    if snap.view_count is not None:
+        return _safe_div(snap.share_count, snap.view_count)
+    if platform in NO_VIEW_PLATFORMS:
+        return float(snap.share_count)  # raw shares — consistent within Threads
+    return None
 
 
 def _score_save_rate(snap: PostSnapshot, platform: str) -> Optional[float]:
-    if platform != "tiktok":
+    # Only TikTok exposes a save/bookmark count today (and TikTok always has views).
+    if snap.save_count is None:
         return None
     return _safe_div(snap.save_count, snap.view_count)
 
@@ -318,47 +355,24 @@ def _score_velocity(
 
 
 def _score_relative_baseline(
-    session: Session, platform: str, post_id: str, account_handle: str
+    latest_volume: Optional[float],
+    account_median: Optional[float],
+    platform_median: Optional[float],
 ) -> Optional[float]:
-    """Latest views / median views for this account's posts."""
-    # Latest snapshot for this post
-    latest = (
-        session.query(PostSnapshot)
-        .filter_by(platform=platform, platform_post_id=post_id)
-        .order_by(PostSnapshot.fetched_at.desc())
-        .first()
-    )
-    if latest is None or latest.view_count is None:
-        return None
+    """How abnormal this post's reach is vs a baseline.
 
-    # Median view_count across all snapshots for this account's posts (latest snap per post)
-    # Simple approach: latest snapshot per post for the same account
-    account_posts = (
-        session.query(Post.platform_post_id)
-        .filter_by(platform=platform, account_handle=account_handle)
-        .all()
-    )
-    account_post_ids = [r[0] for r in account_posts]
-    if not account_post_ids:
+    Baseline = the creator's own median volume when we hold enough of their posts,
+    otherwise the platform-wide median ("abnormal for this platform"). Volume is
+    views where the platform exposes them, else the engagement sum — so this works
+    on view-less platforms (Threads) too. Computed from precomputed medians
+    (see rank()) to avoid a per-post query storm.
+    """
+    if latest_volume is None:
         return None
-
-    views_list = []
-    for pid in account_post_ids:
-        snap = (
-            session.query(PostSnapshot.view_count)
-            .filter_by(platform=platform, platform_post_id=pid)
-            .order_by(PostSnapshot.fetched_at.desc())
-            .first()
-        )
-        if snap and snap[0] is not None:
-            views_list.append(snap[0])
-
-    if len(views_list) < 2:
+    base = account_median if (account_median and account_median > 0) else platform_median
+    if not base or base <= 0:
         return None
-    median = statistics.median(views_list)
-    if median == 0:
-        return None
-    return latest.view_count / median
+    return latest_volume / base
 
 
 def _score_cross_persona(
@@ -455,9 +469,11 @@ def rank(
 
     posts = q.all()
 
-    cards = []
+    # ---- Pass 1: latest snapshot + volume per post; accumulate baseline medians ----
+    rows: list[tuple[Post, PostSnapshot, Optional[float]]] = []
+    vol_by_platform: dict[str, list[float]] = {}
+    vol_by_account: dict[tuple[str, str], list[float]] = {}
     for post in posts:
-        # Latest snapshot
         snap = (
             session.query(PostSnapshot)
             .filter_by(platform=post.platform, platform_post_id=post.platform_post_id)
@@ -466,7 +482,24 @@ def rank(
         )
         if snap is None:
             continue
+        vol = _volume_metric(snap, post.platform)
+        rows.append((post, snap, vol))
+        if vol is not None:
+            vol_by_platform.setdefault(post.platform, []).append(vol)
+            vol_by_account.setdefault((post.platform, post.account_handle), []).append(vol)
 
+    platform_median = {
+        p: statistics.median(v) for p, v in vol_by_platform.items() if v
+    }
+    account_median = {
+        key: statistics.median(v)
+        for key, v in vol_by_account.items()
+        if len(v) >= MIN_ACCOUNT_BASELINE_SAMPLES
+    }
+
+    # ---- Pass 2: score + build cards ----
+    cards = []
+    for post, snap, vol in rows:
         plat = post.platform
         pid = post.platform_post_id
 
@@ -502,7 +535,11 @@ def rank(
         elif effective_sort == "velocity":
             score = _score_velocity(session, plat, pid)
         elif effective_sort == "relative_baseline":
-            score = _score_relative_baseline(session, plat, pid, post.account_handle)
+            score = _score_relative_baseline(
+                vol,
+                account_median.get((plat, post.account_handle)),
+                platform_median.get(plat),
+            )
         elif effective_sort == "cross_persona":
             score = _score_cross_persona(session, plat, pid)
         else:

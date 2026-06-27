@@ -32,6 +32,7 @@ can stash each COMPLETE raw API item in ``PostRecord.raw`` (instagrapi's parsed
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from datetime import datetime, timezone
@@ -60,7 +61,7 @@ from instagrapi.exceptions import (
 from instagrapi.extractors import extract_media_v1
 
 from core.adapter import PlatformAdapter
-from core.schema import GeoTier, MediaType, PostRecord, Trend, WatchedAccount
+from core.schema import GeoTier, MediaType, PostRecord, SoundRecord, Trend, WatchedAccount
 
 # instagrapi media_type (int) -> our normalized MediaType. A reel is media_type 2
 # (video) with product_type "clips"; reel-ness is flagged separately in extras.
@@ -244,6 +245,165 @@ class InstagramAdapter(PlatformAdapter):
         except _BACKOFF_EXCEPTIONS as err:
             raise self._as_softblock(err, partial=records)
         return records
+
+    # ---------------------------------------------------------- sound pivot
+
+    def fetch_trending_sound_ids(self, *, limit: int = 30) -> list[str]:
+        """IG's trending audios — the reused-a-lot sounds, straight from the source.
+
+        Reads ``music/top_trends/`` (and ``music/trending/`` as a top-up) and pulls
+        out audio_cluster_ids, newest/most-trending first, deduped. These feed the
+        sound pivot so we discover heavily-reused sounds without waiting for them to
+        appear in a harvested post. Best-effort: a back-off raises SoftBlockError;
+        any other miss yields whatever ids we already gathered.
+        """
+        ids: list[str] = []
+        seen: set[str] = set()
+
+        def _collect(payload: Any) -> None:
+            for cid in re.findall(r'"audio_cluster_id"\s*:\s*"?(\d{6,})"?', json.dumps(payload)):
+                if cid not in seen:
+                    seen.add(cid)
+                    ids.append(cid)
+
+        try:
+            for product in ("music_in_feed", "feed_post"):
+                if len(ids) >= limit:
+                    break
+                _collect(self.cl.music_top_trends(product=product, page_size=15))
+            if len(ids) < limit:
+                _collect(self.cl.music_trending(product="feed_post"))
+        except _BACKOFF_EXCEPTIONS as err:
+            raise self._as_softblock(err)
+        except Exception:
+            pass
+        return ids[:limit]
+
+    def fetch_sound(
+        self, audio_cluster_id: str, *, videos_limit: int = 30, max_pages: int = 2
+    ) -> "tuple[SoundRecord, list[PostRecord]]":
+        """Pivot on one IG audio: the reels using it + a reuse count if IG gives one.
+
+        Hits the audio page (``clips/music/``, the same endpoint instagrapi's
+        ``track_info_by_id`` uses) and pages a bounded number of reels. Unlike
+        TikTok there is no single ``videoCount`` field, so ``video_count`` is taken
+        from a platform count in the payload **only if present** (left None
+        otherwise — the song ranker then falls back to our observed post-count). The
+        real win is breadth: one pivot pulls in many reels for the sound, so the
+        derived post-count becomes a meaningful reuse signal.
+
+        BURNER + PACING: needs a logged-in burner (caller's job) and is ban-sensitive
+        — view hydration is forced off here (one call per reel would multiply ban
+        surface). Raises :class:`SoftBlockError` on a challenge / rate limit.
+        """
+        fetched_at = datetime.now(timezone.utc)
+        items_raw: list[dict[str, Any]] = []
+        header: Optional[dict[str, Any]] = None
+        max_id = ""
+        pages = 0
+        try:
+            while pages < max_pages and len(items_raw) < videos_limit:
+                data: dict[str, Any] = {
+                    "audio_cluster_id": str(audio_cluster_id),
+                    "original_sound_audio_asset_id": str(audio_cluster_id),
+                    "_uuid": self.cl.uuid,
+                    "tab_type": "clips",
+                }
+                if max_id:
+                    data["max_id"] = max_id
+                self.cl.private_request("clips/music/", data)
+                last = self.cl.last_json or {}
+                if header is None:
+                    header = last
+                for it in (last.get("items") or []):
+                    media = it.get("media") if isinstance(it, dict) and "media" in it else it
+                    if isinstance(media, dict):
+                        items_raw.append(media)
+                paging = last.get("paging_info") or {}
+                max_id = paging.get("max_id") or last.get("next_max_id") or ""
+                pages += 1
+                if not max_id or not paging.get("more_available", False):
+                    break
+        except _BACKOFF_EXCEPTIONS as err:
+            raise self._as_softblock(err)
+
+        # Normalize reels to PostRecords. Force view hydration OFF for the batch.
+        prev_hydrate = self.hydrate_views
+        self.hydrate_views = False
+        records: list[PostRecord] = []
+        try:
+            for raw in items_raw[:videos_limit]:
+                user = raw.get("user") or {}
+                handle = user.get("username") or ""
+                acct = WatchedAccount(
+                    handle=handle, platform=self.platform,
+                    segment="adjacent", geo_tier=None,
+                )
+                try:
+                    rec = self._to_record(
+                        raw, acct, follower_count=user.get("follower_count")
+                    )
+                except Exception:
+                    rec = None
+                if rec is not None and rec.raw and handle:
+                    records.append(rec)
+        finally:
+            self.hydrate_views = prev_hydrate
+
+        return self._sound_record_from_audio_page(
+            audio_cluster_id, header, records, fetched_at
+        ), records
+
+    def _sound_record_from_audio_page(
+        self,
+        audio_cluster_id: str,
+        header: Optional[dict[str, Any]],
+        records: list[PostRecord],
+        fetched_at: datetime,
+    ) -> SoundRecord:
+        """Build a SoundRecord from a ``clips/music/`` payload + the reels we got."""
+        header = header or {}
+        meta = header.get("metadata") if isinstance(header.get("metadata"), dict) else {}
+        music_info = meta.get("music_info") if isinstance(meta.get("music_info"), dict) else {}
+        asset = (
+            music_info.get("music_asset_info")
+            if isinstance(music_info.get("music_asset_info"), dict) else {}
+        )
+        consumption = (
+            music_info.get("music_consumption_info")
+            if isinstance(music_info.get("music_consumption_info"), dict) else {}
+        )
+
+        title = asset.get("title")
+        author_name = asset.get("display_artist") or asset.get("artist_name")
+        cover = (
+            asset.get("cover_artwork_thumbnail_uri")
+            or asset.get("cover_artwork_uri")
+        )
+        play_url = asset.get("progressive_download_url") or asset.get("fast_start_progressive_download_url")
+
+        # The reels carry a stable asset audio_id (what our posts group under); the
+        # trending list's audio_cluster_id can differ. Prefer the reels' id so the
+        # Sound row joins the song aggregate. Title/author fall back to a reel too.
+        reel_sound_id = records[0].sound_id if records else None
+        if (not title) and records:
+            title = records[0].sound_name
+
+        return SoundRecord(
+            platform=self.platform,
+            sound_id=str(reel_sound_id or asset.get("audio_cluster_id") or audio_cluster_id),
+            fetched_at=fetched_at,
+            raw=header if isinstance(header, dict) else {},
+            title=title,
+            author_name=author_name,
+            # IG's own reuse count is a FORMATTED string ("1.2M"); parse it to an
+            # int magnitude for ranking. None → ranker falls back to observed count.
+            video_count=_parse_formatted_count(consumption.get("formatted_clips_media_count")),
+            is_original=bool(asset.get("is_original_sound")) if asset.get("is_original_sound") is not None else None,
+            cover_url=str(cover) if cover else None,
+            play_url=str(play_url) if play_url else None,
+            duration_sec=(asset.get("duration_in_ms") / 1000.0) if asset.get("duration_in_ms") else None,
+        )
 
     def fetch_trends(self, geo_tier: GeoTier) -> list[Trend]:
         # No free Instagram trending source exists — switching to the private API
@@ -564,3 +724,28 @@ class InstagramAdapter(PlatformAdapter):
 
 def _str_or_none(v: Any) -> Optional[str]:
     return None if v is None else str(v)
+
+
+def _parse_formatted_count(text: Any) -> Optional[int]:
+    """Parse IG's formatted reuse count ("1.2M reels", "12.3K", "1,234") to an int.
+
+    IG only exposes the audio-page media count as a human string, so exact
+    precision is lost — fine for *ranking* by magnitude (the whole point of
+    "reused most"). Returns None when there's nothing parseable.
+    """
+    if isinstance(text, (int, float)):
+        return int(text)
+    if not isinstance(text, str):
+        return None
+    m = re.search(r"([\d.,]+)\s*([KkMmBb])?", text)
+    if not m:
+        return None
+    num = m.group(1).replace(",", "")
+    try:
+        value = float(num)
+    except ValueError:
+        return None
+    mult = {"k": 1_000, "m": 1_000_000, "b": 1_000_000_000}.get(
+        (m.group(2) or "").lower(), 1
+    )
+    return int(value * mult)

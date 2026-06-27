@@ -64,6 +64,31 @@ class PostRecord:
 
 
 @dataclass
+class SoundRecord:
+    """One sound/song as the PLATFORM itself describes it — not derived from our posts.
+
+    The point is ``video_count``: the platform's own count of how many videos use
+    this sound (TikTok ``/api/music/detail`` ``stats.videoCount``). That is the
+    authoritative "reused this many times" signal the post-derived aggregate can't
+    see (we only ever sample a handful of a sound's videos). ``raw`` keeps the
+    complete music-detail payload.
+    """
+    platform: str
+    sound_id: str
+    fetched_at: datetime
+    raw: dict[str, Any]
+
+    title: Optional[str] = None
+    author_name: Optional[str] = None
+    # Platform-reported number of videos using this sound — the reuse count.
+    video_count: Optional[int] = None
+    is_original: Optional[bool] = None
+    cover_url: Optional[str] = None
+    play_url: Optional[str] = None
+    duration_sec: Optional[float] = None
+
+
+@dataclass
 class Trend:
     """A pattern (hashtag/sound/format/topic) gaining traction, per platform + geo."""
     platform: str

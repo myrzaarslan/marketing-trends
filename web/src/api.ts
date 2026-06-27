@@ -7,6 +7,13 @@ import type {
   DigestResponse,
   HardRefreshRequest,
   RefreshStatus,
+  ResnapshotResult,
+  SnapshotSeries,
+  Song,
+  SongDetail,
+  SongFilters,
+  SongHardRefreshRequest,
+  SongsResponse,
 } from './types';
 
 const API_BASE = import.meta.env.VITE_API_URL ?? '';
@@ -32,7 +39,11 @@ function jsonInit(method: string, body?: unknown): RequestInit {
 
 export function fetchDigest(filters: DigestFilters): Promise<DigestResponse> {
   const params = new URLSearchParams();
-  if (filters.platform) params.set('platform', filters.platform);
+  if (filters.platforms && filters.platforms.length) {
+    params.set('platforms', filters.platforms.join(','));
+  } else if (filters.platform) {
+    params.set('platform', filters.platform);
+  }
   if (filters.geo) params.set('geo', filters.geo);
   params.set('period', String(filters.period));
   params.set('sort', filters.sort);
@@ -49,6 +60,80 @@ export function fetchDigestMeta(platform?: string): Promise<DigestMeta> {
 
 export function fetchPost(platform: string, platformPostId: string): Promise<ContentBundle> {
   return apiFetch<ContentBundle>(`/post/${platform}/${platformPostId}`);
+}
+
+export function fetchSnapshots(
+  platform: string,
+  platformPostId: string,
+): Promise<SnapshotSeries> {
+  return apiFetch<SnapshotSeries>(`/post/${platform}/${platformPostId}/snapshots`);
+}
+
+/** Re-observe the post live now, append a fresh snapshot, return the updated series. */
+export function resnapshotPost(
+  platform: string,
+  platformPostId: string,
+): Promise<ResnapshotResult> {
+  return apiFetch<ResnapshotResult>(
+    `/post/${platform}/${platformPostId}/resnapshot`,
+    { method: 'POST' },
+  );
+}
+
+/** Priority-download a single post's media on demand. Returns the fresh bundle. */
+export function enrichPost(
+  platform: string,
+  platformPostId: string,
+  force = false,
+): Promise<ContentBundle> {
+  const q = force ? '?force=true' : '';
+  return apiFetch<ContentBundle>(`/post/${platform}/${platformPostId}/enrich${q}`, { method: 'POST' });
+}
+
+// --- Songs (viral sounds) ---------------------------------------------------
+
+export function fetchSongs(filters: SongFilters): Promise<SongsResponse> {
+  const params = new URLSearchParams();
+  if (filters.platform) params.set('platform', filters.platform);
+  if (filters.geo) params.set('geo', filters.geo);
+  params.set('period', String(filters.period));
+  params.set('sort', filters.sort);
+  params.set('limit', String(filters.limit));
+  if (filters.unseen_only) params.set('unseen_only', 'true');
+  return apiFetch<SongsResponse>(`/songs?${params}`);
+}
+
+export function fetchSongDetail(
+  song: Pick<Song, 'platform' | 'key'>,
+  filters: Pick<SongFilters, 'geo' | 'period' | 'sort'>,
+): Promise<SongDetail> {
+  const params = new URLSearchParams();
+  params.set('platform', song.platform);
+  params.set('key', song.key);
+  if (filters.geo) params.set('geo', filters.geo);
+  params.set('period', String(filters.period));
+  params.set('sort', filters.sort);
+  return apiFetch<SongDetail>(`/song?${params}`);
+}
+
+export function putSongFlags(
+  platform: string,
+  key: string,
+  flags: { hidden?: boolean; pinned?: boolean },
+): Promise<{ hidden: boolean; pinned: boolean }> {
+  return apiFetch('/song/flags', jsonInit('PUT', { platform, key, ...flags }));
+}
+
+/** Direct URL to download a song's audio file (served by the API). */
+export function songAudioUrl(platform: string, key: string): string {
+  const params = new URLSearchParams({ platform, key });
+  return `${API_BASE}/song/audio?${params}`;
+}
+
+export function triggerSongHardRefresh(
+  req: SongHardRefreshRequest,
+): Promise<{ job_id: string }> {
+  return apiFetch<{ job_id: string }>('/songs/refresh/hard', jsonInit('POST', req));
 }
 
 // --- Refresh ----------------------------------------------------------------

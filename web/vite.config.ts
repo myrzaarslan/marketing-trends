@@ -7,8 +7,11 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      // Proxy API calls to FastAPI during development
+      // Proxy API calls to FastAPI during development.
+      // NOTE: '/song' also matches '/songs' and '/songs/refresh/...' (prefix match).
       '/digest': 'http://localhost:8001',
+      '/songs': 'http://localhost:8001',
+      '/song': 'http://localhost:8001',
       '/post': 'http://localhost:8001',
       '/media': 'http://localhost:8001',
       '/refresh': 'http://localhost:8001',

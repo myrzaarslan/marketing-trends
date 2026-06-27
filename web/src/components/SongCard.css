@@ -1,0 +1,202 @@
+.song-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  cursor: pointer;
+  transition: border-color 0.15s, box-shadow 0.15s, transform 0.15s;
+}
+
+.song-card:hover {
+  border-color: var(--amber-dim);
+  box-shadow: 0 0 0 1px var(--amber-dim), 0 4px 20px rgba(0, 0, 0, 0.4);
+  transform: translateY(-1px);
+}
+
+.song-card:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .song-card, .song-card:hover { transform: none; transition: none; }
+}
+
+.song-thumb {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  background: #0A0A0B;
+  overflow: hidden;
+}
+
+.song-thumb img { width: 100%; height: 100%; object-fit: cover; }
+
+.song-thumb-placeholder {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, #16131c, #0E0E10);
+  color: var(--amber-dim);
+  font-size: 3rem;
+}
+
+.song-rank {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: var(--amber);
+  background: rgba(8, 8, 9, 0.85);
+  padding: 2px 7px;
+  border-radius: 4px;
+  letter-spacing: 0.04em;
+  border: 1px solid rgba(212, 136, 42, 0.25);
+}
+
+.song-platform-badge {
+  position: absolute;
+  bottom: 8px;
+  left: 8px;
+  font-size: 0.65rem;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 3px;
+  color: #fff;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+}
+
+.song-platform-badge[data-platform="tiktok"]    { background: rgba(254, 44, 85, 0.9); }
+.song-platform-badge[data-platform="instagram"] { background: rgba(193, 53, 132, 0.9); }
+
+.song-note-icon {
+  position: absolute;
+  bottom: 8px;
+  right: 8px;
+  font-size: 0.8rem;
+  color: rgba(255, 255, 255, 0.6);
+  background: rgba(8, 8, 9, 0.6);
+  padding: 1px 6px;
+  border-radius: 3px;
+}
+
+.song-select {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 6;
+  display: flex;
+  background: rgba(0, 0, 0, 0.55);
+  border-radius: 5px;
+  padding: 3px;
+  cursor: pointer;
+}
+.song-select input { width: 16px; height: 16px; cursor: pointer; accent-color: var(--amber); }
+
+.song-actions {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 6;
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.song-card:hover .song-actions,
+.song-card:focus-within .song-actions { opacity: 1; }
+
+.song-action {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.6);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  backdrop-filter: blur(2px);
+}
+.song-action:hover { background: rgba(0, 0, 0, 0.85); border-color: var(--amber-dim); }
+.song-action--on { border-color: var(--amber); box-shadow: 0 0 0 1px var(--amber); }
+
+.song-body {
+  padding: 10px 12px 11px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+}
+
+.song-title-row { display: flex; align-items: center; }
+
+.song-title {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--text-hi);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.song-author {
+  font-size: 0.72rem;
+  color: var(--text-mid);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.song-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.song-metric {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.15;
+}
+
+.song-metric-val {
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--text-hi);
+  font-variant-numeric: tabular-nums;
+}
+
+.song-metric-label {
+  font-size: 0.58rem;
+  color: var(--text-lo);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.song-metric--primary .song-metric-val { color: var(--amber); }
+.song-metric--rising .song-metric-val { color: #4ec98a; }
+.song-metric--estimate .song-metric-val { color: var(--text-dim, #8a8a8a); }
+.song-metric--estimate { opacity: 0.8; }
+
+.song-card--pinned {
+  border-color: var(--amber-dim);
+  box-shadow: inset 0 2px 0 var(--amber);
+}
+.song-card--selected {
+  border-color: var(--amber);
+  box-shadow: 0 0 0 2px var(--amber);
+}

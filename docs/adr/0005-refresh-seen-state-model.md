@@ -21,12 +21,17 @@ A `post_flags` row carries `last_served_at` (Seen), `pinned`, and `hidden`:
 
 Hidden posts are excluded from every Digest by default; pinned posts always survive rotation.
 
+> **Superseded in part by [ADR-0006](0006-distributed-local-nodes-central-corpus.md):** in the
+> multi-user deployment, Seen/pinned/hidden and Notes become **per-user** (namespaced by `user_id`),
+> not global per post. "One post, one state" becomes "one post, one state *per user*." Everything
+> else in this ADR (rotation, recycling, soft/hard/selective semantics) stands.
+
 **Why (the trade-off).** Seen-state rotation makes "unique each time" a cheap O(corpus) ranking
 filter instead of a fresh harvest, so the common case (corpus) is instant and live scraping is
 opt-in per the cost concern. Recycling accepts that "unseen" is eventually a lie on a finite corpus
 — we'd rather resurface the oldest-seen post than show an empty list. Seen/pinned/hidden are
 **global per post** (not per Collection), keeping the mental model "one post, one state" — the same
-reason Notes are global.
+reason Notes are global. *(See the supersession note above: this becomes per-user under ADR-0006.)*
 
 **Consequences.**
 - New table `post_flags` (+ `collections`, `collection_items`, `post_notes`); `init_db` creates

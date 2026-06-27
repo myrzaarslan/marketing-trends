@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Collection, ContentBundle, DigestCard } from '../types';
-import { fetchPost } from '../api';
+import { enrichPost, fetchPost } from '../api';
+import { StatsChart } from './StatsChart';
 import { profileUrl } from '../platformLinks';
 import { SaveMenu } from './SaveMenu';
 import { NoteEditor } from './NoteEditor';
@@ -16,6 +17,8 @@ interface Props {
   onToggleCollection: (card: DigestCard, collectionId: number, makeMember: boolean) => void;
   onCreateCollection: (title: string) => Promise<Collection | null>;
   onSaveNote: (card: DigestCard, body: string) => void;
+  /** Fired when on-demand enrichment produced media, so the list can show its thumbnail. */
+  onEnriched?: (card: DigestCard, thumbnail: string | null) => void;
 }
 
 const PLATFORM_LABELS: Record<string, string> = {
@@ -223,19 +226,43 @@ export function PostLightbox({
   onToggleCollection,
   onCreateCollection,
   onSaveNote,
+  onEnriched,
 }: Props) {
   const [bundle, setBundle] = useState<ContentBundle | null>(null);
   const [loading, setLoading] = useState(true);
+  const [enriching, setEnriching] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saveOpen, setSaveOpen] = useState(false);
 
   useEffect(() => {
+    let cancelled = false;
     setLoading(true);
+    setEnriching(false);
     setError(null);
     fetchPost(card.platform, card.platform_post_id)
-      .then(setBundle)
-      .catch((e) => setError(e instanceof Error ? e.message : String(e)))
-      .finally(() => setLoading(false));
+      .then((b) => {
+        if (cancelled) return;
+        setBundle(b);
+        setLoading(false);
+        // Media not downloaded yet → priority-enrich this post on demand.
+        if (!b.enriched) {
+          setEnriching(true);
+          enrichPost(card.platform, card.platform_post_id)
+            .then((nb) => {
+              if (cancelled) return;
+              setBundle(nb);
+              if (nb.enriched) onEnriched?.(card, nb.thumbnail ?? null);
+            })
+            .catch(() => { /* keep the un-enriched bundle (thumbnail/text still show) */ })
+            .finally(() => { if (!cancelled) setEnriching(false); });
+        }
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setError(e instanceof Error ? e.message : String(e));
+        setLoading(false);
+      });
+    return () => { cancelled = true; };
   }, [card.platform, card.platform_post_id]);
 
   // Close on Escape
@@ -409,14 +436,22 @@ export function PostLightbox({
                     <Carousel items={mediaItems} platform={platform} />
                   )
                 ) : (
-                  // Non-enriched or no media: show thumbnail + graceful note
+                  // No media yet: show thumbnail + (priority download) status overlay.
                   <div className="lb-media lb-media--placeholder">
                     {card.thumbnail ? (
                       <img src={card.thumbnail} alt="thumbnail" className="lb-image lb-image--thumb" />
                     ) : (
                       <div className="lb-media-empty">
                         <span className="lb-media-empty-label">{card.media_type.toUpperCase()}</span>
-                        <span className="lb-media-empty-sub">No media downloaded</span>
+                        <span className="lb-media-empty-sub">
+                          {enriching ? 'Downloading media…' : 'No media downloaded'}
+                        </span>
+                      </div>
+                    )}
+                    {enriching && (
+                      <div className="lb-enriching-overlay">
+                        <span className="lb-enriching-spinner" aria-hidden />
+                        <span className="lb-enriching-label">Downloading media…</span>
                       </div>
                     )}
                   </div>
@@ -483,6 +518,11 @@ export function PostLightbox({
                     <p className="lb-stats-empty">No counts captured for this specimen yet.</p>
                   </div>
                 )}
+
+                {/* Engagement trend over time (snapshot series + velocity) */}
+                <div className="lb-section">
+                  <StatsChart platform={platform} platformPostId={card.platform_post_id} />
+                </div>
 
                 {/* Provenance */}
                 <div className="lb-section lb-provenance">

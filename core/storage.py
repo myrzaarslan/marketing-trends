@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -34,7 +34,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
-from core.schema import GeoTier, PostRecord, WatchedAccount
+from core.schema import GeoTier, PostRecord, SoundRecord, WatchedAccount
 
 # ---------------------------------------------------------------------------
 # Engine + session factory
@@ -295,6 +295,69 @@ class PostFlag(Base):
         Index("ix_post_flags_hidden", "hidden"),
         Index("ix_post_flags_pinned", "pinned"),
         Index("ix_post_flags_served", "last_served_at"),
+    )
+
+
+class SongFlag(Base):
+    """Per-song user state that drives the song-list refresh (mirror of PostFlag).
+
+    A song is identified per-platform by (platform, song_key) — song_key is the
+    stable sound id or a `name:<normalized>` fallback (see core/songs.py). There is
+    no FK to posts: a song is a derived aggregate, not a stored row.
+
+    - hidden:         never show this song in the song list.
+    - pinned:         keep this song across a hard refresh (it survives the swap).
+    - last_served_at: when this song was last shown — lets hard refresh return
+                      previously-unseen songs and recycle least-recently-seen ones
+                      once the unseen pool is exhausted.
+    """
+
+    __tablename__ = "song_flags"
+
+    platform = Column(String(32), primary_key=True, nullable=False)
+    song_key = Column(String(256), primary_key=True, nullable=False)
+    hidden = Column(Boolean, nullable=False, default=False)
+    pinned = Column(Boolean, nullable=False, default=False)
+    last_served_at = Column(DateTime, nullable=True)
+
+    __table_args__ = (
+        Index("ix_song_flags_hidden", "hidden"),
+        Index("ix_song_flags_pinned", "pinned"),
+        Index("ix_song_flags_served", "last_served_at"),
+    )
+
+
+class Sound(Base):
+    """Authoritative per-platform sound, as the PLATFORM describes it.
+
+    Distinct from the *derived* song aggregate (core/songs.py groups our own
+    posts): this row is populated by pivoting on the platform's sound-detail page
+    (TikTok ``/api/music/detail``), which reports ``video_count`` — how many videos
+    use the sound across ALL of TikTok, not just the handful we happened to harvest.
+    That count is the "reused most" ranking signal. Keyed by (platform, song_key)
+    so it joins cleanly onto the song aggregate (song_key == songs.song_key_for).
+    """
+
+    __tablename__ = "sounds"
+
+    platform = Column(String(32), primary_key=True, nullable=False)
+    song_key = Column(String(256), primary_key=True, nullable=False)
+    sound_id = Column(String(128), nullable=True)
+    title = Column(Text, nullable=True)
+    author_name = Column(Text, nullable=True)
+    # Platform-reported reuse count (videos using this sound). The ranking signal.
+    video_count = Column(Integer, nullable=True)
+    is_original = Column(Boolean, nullable=True)
+    cover_url = Column(Text, nullable=True)
+    play_url = Column(Text, nullable=True)
+    duration_sec = Column(Float, nullable=True)
+
+    first_seen_at = Column(DateTime, nullable=False)
+    last_refreshed_at = Column(DateTime, nullable=False)
+    raw = Column(Text, nullable=True)  # full music-detail payload
+
+    __table_args__ = (
+        Index("ix_sounds_platform_count", "platform", "video_count"),
     )
 
 
@@ -686,31 +749,41 @@ def served_ids(session: Session) -> set[tuple[str, str]]:
 
 
 def count_unseen_eligible(
-    session: Session, *, exclude_hidden: bool = True
+    session: Session,
+    *,
+    exclude_hidden: bool = True,
+    platforms: set[str] | None = None,
 ) -> int:
-    """How many posts have never been served (and aren't hidden)."""
+    """How many posts have never been served (and aren't hidden).
+
+    Pass `platforms` to scope the count to a platform subset — a platform-scoped
+    refresh must measure (and recycle) against its own pool, not the global one.
+    """
     served = served_ids(session)
     hidden = flag_ids(session, hidden=True) if exclude_hidden else set()
     blocked = served | hidden
-    total = session.query(Post.platform, Post.platform_post_id).all()
-    return sum(1 for r in total if (r[0], r[1]) not in blocked)
+    q = session.query(Post.platform, Post.platform_post_id)
+    if platforms:
+        q = q.filter(Post.platform.in_(platforms))
+    return sum(1 for r in q.all() if (r[0], r[1]) not in blocked)
 
 
-def recycle_oldest_served(session: Session, count: int) -> int:
+def recycle_oldest_served(
+    session: Session, count: int, *, platforms: set[str] | None = None
+) -> int:
     """Reset last_served_at=NULL for the `count` least-recently-served posts.
 
     Lets hard refresh keep producing content once the unseen pool is exhausted —
     the oldest-seen posts become 'unseen' again. Returns how many were recycled.
+    Pass `platforms` to recycle only within a platform subset (so a scoped refresh
+    resurfaces its own posts, not unrelated platforms').
     """
     if count <= 0:
         return 0
-    rows = (
-        session.query(PostFlag)
-        .filter(PostFlag.last_served_at.isnot(None))
-        .order_by(PostFlag.last_served_at.asc())
-        .limit(count)
-        .all()
-    )
+    q = session.query(PostFlag).filter(PostFlag.last_served_at.isnot(None))
+    if platforms:
+        q = q.filter(PostFlag.platform.in_(platforms))
+    rows = q.order_by(PostFlag.last_served_at.asc()).limit(count).all()
     for r in rows:
         r.last_served_at = None
     return len(rows)
@@ -732,3 +805,204 @@ def flags_for(session: Session, ids: list[tuple[str, str]]) -> dict[tuple[str, s
         for r in rows
         if (r.platform, r.platform_post_id) in wanted
     }
+
+
+# ---------------------------------------------------------------------------
+# Song flags (hidden / pinned / seen) — drive the song-list refresh
+# ---------------------------------------------------------------------------
+
+
+def _get_or_create_song_flag(session: Session, platform: str, song_key: str) -> SongFlag:
+    flag = session.get(SongFlag, (platform, song_key))
+    if flag is None:
+        flag = SongFlag(platform=platform, song_key=song_key)
+        session.add(flag)
+        session.flush()
+    return flag
+
+
+def set_song_hidden(session: Session, platform: str, song_key: str, hidden: bool) -> None:
+    _get_or_create_song_flag(session, platform, song_key).hidden = hidden
+
+
+def set_song_pinned(session: Session, platform: str, song_key: str, pinned: bool) -> None:
+    _get_or_create_song_flag(session, platform, song_key).pinned = pinned
+
+
+def mark_songs_served(session: Session, keys: list[tuple[str, str]]) -> None:
+    """Stamp last_served_at=now for each (platform, song_key)."""
+    now = _utcnow_naive()
+    for platform, song_key in keys:
+        _get_or_create_song_flag(session, platform, song_key).last_served_at = now
+
+
+def song_flag_ids(
+    session: Session, *, hidden: bool | None = None, pinned: bool | None = None
+) -> set[tuple[str, str]]:
+    q = session.query(SongFlag.platform, SongFlag.song_key)
+    if hidden is not None:
+        q = q.filter(SongFlag.hidden == hidden)
+    if pinned is not None:
+        q = q.filter(SongFlag.pinned == pinned)
+    return {(r[0], r[1]) for r in q.all()}
+
+
+def served_song_keys(session: Session) -> set[tuple[str, str]]:
+    """Songs shown at least once (last_served_at set)."""
+    rows = (
+        session.query(SongFlag.platform, SongFlag.song_key)
+        .filter(SongFlag.last_served_at.isnot(None))
+        .all()
+    )
+    return {(r[0], r[1]) for r in rows}
+
+
+def recycle_oldest_served_songs(
+    session: Session, count: int, *, platforms: set[str] | None = None
+) -> int:
+    """Reset last_served_at=NULL for the `count` least-recently-served songs."""
+    if count <= 0:
+        return 0
+    q = session.query(SongFlag).filter(SongFlag.last_served_at.isnot(None))
+    if platforms:
+        q = q.filter(SongFlag.platform.in_(platforms))
+    rows = q.order_by(SongFlag.last_served_at.asc()).limit(count).all()
+    for r in rows:
+        r.last_served_at = None
+    return len(rows)
+
+
+def song_flags_for(
+    session: Session, keys: list[tuple[str, str]]
+) -> dict[tuple[str, str], dict]:
+    """Bulk-fetch {hidden, pinned, last_served_at} for a set of songs."""
+    if not keys:
+        return {}
+    platforms = {p for p, _ in keys}
+    rows = session.query(SongFlag).filter(SongFlag.platform.in_(platforms)).all()
+    wanted = set(keys)
+    return {
+        (r.platform, r.song_key): {
+            "hidden": bool(r.hidden),
+            "pinned": bool(r.pinned),
+            "last_served_at": r.last_served_at.isoformat() if r.last_served_at else None,
+        }
+        for r in rows
+        if (r.platform, r.song_key) in wanted
+    }
+
+
+# ---------------------------------------------------------------------------
+# Sound (authoritative per-platform sound metadata, incl. reuse count)
+# ---------------------------------------------------------------------------
+
+
+def upsert_sound(
+    session: Session, song_key: str, record: SoundRecord
+) -> None:
+    """Insert/refresh the authoritative Sound row for (platform, song_key).
+
+    ``video_count`` is the platform's own reuse count (TikTok stats.videoCount, or
+    the enumerated reel count for IG). Only overwrites a stored count with a fresh
+    non-null value so a transient null fetch never wipes a good number.
+    """
+    now = _utcnow_naive()
+    fetched = (
+        record.fetched_at.replace(tzinfo=None)
+        if record.fetched_at and record.fetched_at.tzinfo
+        else (record.fetched_at or now)
+    )
+    raw_json = json.dumps(record.raw) if record.raw else None
+
+    existing = session.get(Sound, (record.platform, song_key))
+    if existing is None:
+        session.add(Sound(
+            platform=record.platform,
+            song_key=song_key,
+            sound_id=record.sound_id,
+            title=record.title,
+            author_name=record.author_name,
+            video_count=record.video_count,
+            is_original=record.is_original,
+            cover_url=record.cover_url,
+            play_url=record.play_url,
+            duration_sec=record.duration_sec,
+            first_seen_at=fetched,
+            last_refreshed_at=fetched,
+            raw=raw_json,
+        ))
+        return
+
+    existing.last_refreshed_at = fetched
+    existing.sound_id = record.sound_id or existing.sound_id
+    existing.title = record.title or existing.title
+    existing.author_name = record.author_name or existing.author_name
+    if record.video_count is not None:
+        existing.video_count = record.video_count
+    if record.is_original is not None:
+        existing.is_original = record.is_original
+    existing.cover_url = record.cover_url or existing.cover_url
+    existing.play_url = record.play_url or existing.play_url
+    existing.duration_sec = record.duration_sec or existing.duration_sec
+    if raw_json:
+        existing.raw = raw_json
+
+
+def sounds_for(
+    session: Session, keys: list[tuple[str, str]]
+) -> dict[tuple[str, str], dict]:
+    """Bulk-fetch authoritative Sound metadata for a set of (platform, song_key)."""
+    if not keys:
+        return {}
+    platforms = {p for p, _ in keys}
+    rows = session.query(Sound).filter(Sound.platform.in_(platforms)).all()
+    wanted = set(keys)
+    return {
+        (r.platform, r.song_key): {
+            "sound_id": r.sound_id,
+            "title": r.title,
+            "author_name": r.author_name,
+            "video_count": r.video_count,
+            "is_original": bool(r.is_original) if r.is_original is not None else None,
+            "cover_url": r.cover_url,
+            "play_url": r.play_url,
+            "duration_sec": r.duration_sec,
+            "last_refreshed_at": (
+                r.last_refreshed_at.isoformat() if r.last_refreshed_at else None
+            ),
+        }
+        for r in rows
+        if (r.platform, r.song_key) in wanted
+    }
+
+
+def stale_or_missing_sound_keys(
+    session: Session,
+    candidates: list[tuple[str, str]],
+    *,
+    max_age_hours: int = 72,
+) -> list[tuple[str, str]]:
+    """Filter candidate (platform, song_key) to those with no fresh Sound row.
+
+    A key is "fresh" if a Sound row exists with a non-null video_count refreshed
+    within ``max_age_hours``. Everything else is returned (in input order) so the
+    pivot harvest refreshes the ones that actually need it.
+    """
+    if not candidates:
+        return []
+    have = sounds_for(session, candidates)
+    cutoff = _utcnow_naive() - timedelta(hours=max_age_hours)
+    out: list[tuple[str, str]] = []
+    for key in candidates:
+        meta = have.get(key)
+        if not meta or meta.get("video_count") is None:
+            out.append(key)
+            continue
+        refreshed = meta.get("last_refreshed_at")
+        try:
+            ts = datetime.fromisoformat(refreshed) if refreshed else None
+        except (TypeError, ValueError):
+            ts = None
+        if ts is None or ts < cutoff:
+            out.append(key)
+    return out

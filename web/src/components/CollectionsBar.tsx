@@ -5,16 +5,21 @@ import './CollectionsBar.css';
 interface Props {
   collections: Collection[];
   activeId: number | null; // null = Home
+  /** True when the Sounds section is showing (Home/collections inactive). */
+  songsActive?: boolean;
   onSelectHome: () => void;
+  onSelectSongs: () => void;
   onSelectCollection: (id: number) => void;
   onCreate: (title: string) => void;
 }
 
-/** Horizontal rail: Home + collection chips + inline create. */
+/** Horizontal rail: Home + Sounds + collection chips + inline create. */
 export function CollectionsBar({
   collections,
   activeId,
+  songsActive = false,
   onSelectHome,
+  onSelectSongs,
   onSelectCollection,
   onCreate,
 }: Props) {
@@ -32,10 +37,18 @@ export function CollectionsBar({
     <nav className="collections-bar" aria-label="Collections">
       <button
         type="button"
-        className={`coll-chip${activeId === null ? ' coll-chip--active' : ''}`}
+        className={`coll-chip${activeId === null && !songsActive ? ' coll-chip--active' : ''}`}
         onClick={onSelectHome}
       >
         ⌂ Home
+      </button>
+
+      <button
+        type="button"
+        className={`coll-chip${songsActive ? ' coll-chip--active' : ''}`}
+        onClick={onSelectSongs}
+      >
+        ♫ Sounds
       </button>
 
       <span className="coll-divider" />

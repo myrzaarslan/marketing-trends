@@ -94,6 +94,8 @@ export interface RefreshStatus {
 
 export interface DigestFilters {
   platform: string;
+  /** Multi-platform subset (e.g. after a multi-platform refresh); overrides `platform`. */
+  platforms?: string[];
   geo: string;
   period: number;
   sort: SortKey;
@@ -157,6 +159,36 @@ export interface ContentBundle {
 }
 
 // ---------------------------------------------------------------------------
+// Snapshot time series (stats graph)
+// ---------------------------------------------------------------------------
+
+export interface SnapshotPoint {
+  fetched_at: string;
+  view_count: number | null;
+  like_count: number | null;
+  comment_count: number | null;
+  share_count: number | null;
+  save_count: number | null;
+  author_follower_count: number | null;
+  source: string | null;
+}
+
+export interface SnapshotSeries {
+  platform: string;
+  platform_post_id: string;
+  points: SnapshotPoint[];
+  velocity_per_hour: number | null;
+  velocity_metric: 'views' | 'likes' | null;
+}
+
+export interface ResnapshotResult {
+  status: 'updated' | 'not_found' | 'error';
+  error: string | null;
+  fetched: number;
+  series: SnapshotSeries;
+}
+
+// ---------------------------------------------------------------------------
 // Collections
 // ---------------------------------------------------------------------------
 
@@ -183,9 +215,105 @@ export interface HardRefreshRequest {
   source: RefreshSource;
   serve_ids: [string, string][];
   platform?: string | null;
+  /** Multi-platform selection; overrides `platform`. Omitted/empty = all. */
+  platforms?: string[] | null;
   geo?: string | null;
   period?: number;
   sort?: SortKey;
+  limit?: number;
+  live_per_platform?: number;
+}
+
+// ---------------------------------------------------------------------------
+// Songs (viral sounds) — TikTok + Instagram only
+// ---------------------------------------------------------------------------
+
+export type SongSortKey =
+  | 'reuse_count'
+  | 'post_count'
+  | 'total_views'
+  | 'total_engagement'
+  | 'avg_engagement_rate'
+  | 'rising';
+
+export type SongPlatform = 'tiktok' | 'instagram';
+
+export interface Song {
+  platform: SongPlatform;
+  key: string;
+  sound_id: string | null;
+  sound_name: string | null;
+  sound_author: string | null;
+  top_platform_post_id: string | null;
+  geo_tier: string | null;
+  latest_first_seen: string | null;
+  /** Resolved cover thumbnail URL (from the song's strongest post). */
+  thumbnail: string | null;
+
+  /** Cover art from the authoritative Sound row (sound pivot), if any. */
+  cover_url?: string | null;
+  is_original?: boolean | null;
+  /** True when we have an audio source for the sound (pivoted) — show download. */
+  downloadable?: boolean;
+
+  // Metrics (all computed; the UI picks which to rank by)
+  /** Platform's own count of videos using this sound (TikTok videoCount / IG
+   *  formatted clips count) when pivoted, else our observed post_count. */
+  reuse_count: number;
+  /** 'platform' = authoritative pivot count, 'observed' = our post-count floor. */
+  reuse_count_source: 'platform' | 'observed';
+  platform_video_count: number | null;
+  post_count: number;
+  distinct_accounts: number;
+  total_views: number;
+  total_volume: number;
+  total_engagement: number;
+  avg_engagement_rate: number | null;
+  rising: number;
+  recent_post_count: number;
+
+  /** Value of the selected sort, for display. */
+  score: number | null;
+  sort_used: SongSortKey;
+
+  // User state
+  hidden?: boolean;
+  pinned?: boolean;
+}
+
+export interface SongsResponse {
+  count: number;
+  platform: SongPlatform | null;
+  geo_tier: string | null;
+  period_days: number;
+  sort: SongSortKey;
+  unseen_only: boolean;
+  all_sorts: SongSortKey[];
+  default_sort: SongSortKey;
+  songs: Song[];
+}
+
+export interface SongDetail {
+  song: Song;
+  cards: DigestCard[];
+}
+
+export interface SongFilters {
+  platform: '' | SongPlatform;
+  geo: string;
+  period: number;
+  sort: SongSortKey;
+  limit: number;
+  unseen_only?: boolean;
+}
+
+export interface SongHardRefreshRequest {
+  source: RefreshSource;
+  serve_keys: [string, string][];
+  platform?: string | null;
+  geo?: string | null;
+  period?: number;
+  sort?: SongSortKey;
   limit?: number;
   live_per_platform?: number;
 }

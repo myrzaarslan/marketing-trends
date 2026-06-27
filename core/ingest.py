@@ -40,6 +40,85 @@ THUMBNAIL_DIR = DATA_DIR / "thumbnails"
 
 TOP_N_DEFAULT = 25
 
+# ---------------------------------------------------------------------------
+# Celebrity filter — applied DURING scraping so a requested N yields N *good*
+# posts (mega-accounts are skipped before they count toward the target, never
+# scraped-then-deleted). A marketing team hunting trends doesn't want a feed of
+# Ronaldo/NASA/Nike; breakout content from smaller creators is the signal.
+# ---------------------------------------------------------------------------
+
+# Followers above this = "celebrity", filtered out. Mid-tier/creator accounts
+# (the trend signal) sit well below this.
+CELEBRITY_FOLLOWER_CAP = 5_000_000
+
+# Known mega-accounts to drop even when a follower count isn't available (e.g.
+# Instagram Explore payloads omit it). Lowercase, no leading '@'.
+_CELEBRITY_HANDLES: frozenset[str] = frozenset({
+    "cristiano", "leomessi", "nike", "natgeo", "nasa", "instagram",
+    "nytimes", "9gag", "espn", "bbcnews", "netflix", "spotify",
+    "elonmusk", "billgates", "google", "openai", "bbcbreaking", "cnn",
+    "reuters", "nba", "theeconomist", "verge", "wired", "techcrunch",
+    "forbes", "mit", "zuck", "mosseri", "harvard", "khanacademy",
+    "washingtonpost", "realmadrid", "fcbarcelona", "championsleague",
+    "kyliejenner", "kimkardashian", "therock", "selenagomez", "beyonce",
+    "khaby.lame", "mrbeast",
+})
+
+
+def purge_celebrity_posts(session) -> dict:
+    """Delete posts authored by celebrity/mega-accounts already in the corpus.
+
+    A post is a celebrity post if its handle is denylisted OR its max observed
+    follower count exceeds the cap. Cascades to snapshots, content, flags, notes,
+    and collection items. Returns ``{posts, by_handle}``.
+    """
+    from sqlalchemy import func as _func
+    from core.storage import (
+        PostSnapshot, PostContent, PostFlag, PostNote, CollectionItem,
+    )
+
+    # Max follower count observed per post (snapshots may vary).
+    fol_by_post: dict[tuple[str, str], Optional[int]] = {}
+    for plat, pid, fol in session.query(
+        PostSnapshot.platform,
+        PostSnapshot.platform_post_id,
+        _func.max(PostSnapshot.author_follower_count),
+    ).group_by(PostSnapshot.platform, PostSnapshot.platform_post_id).all():
+        fol_by_post[(plat, pid)] = fol
+
+    victims: list[tuple[str, str]] = []
+    by_handle: dict[str, int] = {}
+    for post in session.query(Post).all():
+        key = (post.platform, post.platform_post_id)
+        if is_celebrity(post.account_handle, fol_by_post.get(key)):
+            victims.append(key)
+            by_handle[post.account_handle] = by_handle.get(post.account_handle, 0) + 1
+
+    for plat, pid in victims:
+        for model in (PostSnapshot, PostContent, PostFlag, PostNote, CollectionItem):
+            session.query(model).filter(
+                model.platform == plat, model.platform_post_id == pid
+            ).delete(synchronize_session=False)
+        session.query(Post).filter(
+            Post.platform == plat, Post.platform_post_id == pid
+        ).delete(synchronize_session=False)
+    session.commit()
+    return {"posts": len(victims), "by_handle": by_handle}
+
+
+def is_celebrity(handle: Optional[str], follower_count: Optional[int] = None) -> bool:
+    """True if this author should be filtered out as a celebrity/mega-account.
+
+    Handle denylist catches known mega-accounts even with no follower data
+    (Explore omits it); the follower cap catches everyone else when we do have it.
+    """
+    h = (handle or "").strip().lower().lstrip("@")
+    if h and h in _CELEBRITY_HANDLES:
+        return True
+    if follower_count is not None and follower_count > CELEBRITY_FOLLOWER_CAP:
+        return True
+    return False
+
 
 # ---------------------------------------------------------------------------
 # Thumbnail download (cheap CDN image GET — one per post, keeps cards alive)
@@ -487,11 +566,29 @@ def run_ingestion(
 
 # Small fallback seed sets used only when the DB watchlist is empty for a
 # platform. Kept tiny on purpose — live harvest is the expensive path.
+# Seed handles used when the DB watchlist is empty for a platform. Kept broad so a
+# deep live harvest (live_per_platform up to ~500) can reach volume by BREADTH —
+# many accounts shallow — instead of hammering 3 accounts deep (safer + more
+# diverse). Curate domain-specific accounts via Account.on_watchlist.
 _FALLBACK_SEEDS: dict[str, list[str]] = {
-    "x": ["NASA", "OpenAI", "Google", "nytimes"],
-    "threads": ["zuck", "mosseri", "natgeo", "nasa"],
-    "instagram": [],  # IG needs a logged-in instagrapi session — skip unless watchlisted
-    "tiktok": [],      # TikTok uses discovery (fetch_viral_posts), no account list needed
+    "x": [
+        "NASA", "OpenAI", "Google", "nytimes", "BBCBreaking", "CNN", "Reuters",
+        "espn", "NBA", "TheEconomist", "verge", "WIRED", "TechCrunch", "Forbes",
+        "elonmusk", "BillGates",
+    ],
+    "threads": [
+        "zuck", "mosseri", "natgeo", "nasa", "instagram", "espn", "nba",
+        "bbcnews", "cnn", "theverge", "wired", "netflix",
+    ],
+    # Instagram is harvested from the Explore tab (discovery), not seed accounts —
+    # see harvest_instagram_explore. No seed list needed.
+    "instagram": [],
+    # TikTok primarily uses discovery (fetch_viral_posts); these seed accounts let
+    # it top up toward the target via fetch_account_posts when discovery is thin.
+    "tiktok": [
+        "khaby.lame", "mrbeast", "nasa", "espn", "nba", "netflix",
+        "spotify", "washingtonpost",
+    ],
 }
 
 
@@ -506,11 +603,18 @@ def _watchlist_handles(session, platform: str) -> list[str]:
     return handles or _FALLBACK_SEEDS.get(platform, [])
 
 
-def _make_adapter(platform: str):
-    """Lazily construct a platform adapter (imports are heavy/optional)."""
+def _make_adapter(platform: str, *, ig_hydrate_views: bool = False):
+    """Lazily construct a platform adapter (imports are heavy/optional).
+
+    ``ig_hydrate_views`` only affects Instagram: off for bulk live harvest (mass
+    per-video view hydration is ban bait + slow), on for single-post resnapshot
+    where one extra call to recover the real view count is worth it.
+    """
     if platform == "x":
         from adapters.x import XAdapter
-        return XAdapter()
+        # prefer_graphql recovers the real views.count for recent tweets (the
+        # syndication path can't see it); falls back to syndication on failure.
+        return XAdapter(prefer_graphql=True)
     if platform == "threads":
         from adapters.threads import ThreadsAdapter
         return ThreadsAdapter(headless=True)
@@ -518,9 +622,127 @@ def _make_adapter(platform: str):
         from adapters.tiktok import TikTokAdapter
         return TikTokAdapter()
     if platform == "instagram":
-        from adapters.instagram import InstagramAdapter
-        return InstagramAdapter()
+        return _make_instagram_adapter(hydrate_views=ig_hydrate_views)
     raise ValueError(f"unknown platform {platform!r}")
+
+
+def _make_instagram_adapter(*, hydrate_views: bool = False):
+    """Build a LOGGED-IN Instagram adapter from the burner session.
+
+    IG's mobile private API rejects anonymous callers, so we must authenticate.
+    Auth sources, in order of preference:
+      1. IG_SETTINGS_FILE  — a warmed instagrapi session (device + auth); best.
+      2. IG_SESSIONID      — a raw sessionid cookie.
+      3. secrets/ig_browser_session.json — the {"sessionid": ...} minted by the
+         browser login flow (scratch_login_harvest.py).
+    The Client is pinned to the KZ / ru-RU locale the burner was warmed under so
+    the device fingerprint stays consistent (a mismatch is challenge-bait), and
+    instagrapi's per-request delay is kept slow (4–9s) per the adapter README.
+
+    Raises RuntimeError if no auth source exists — the caller decides whether that
+    is fatal (single-post resnapshot) or just skip-this-platform (harvest_live).
+    """
+    from instagrapi import Client
+    from adapters.instagram import InstagramAdapter
+
+    cl = Client()
+    # Match the locale/device the session was minted under (see
+    # scratch_login_harvest.py); a region/locale mismatch raises IG's suspicion.
+    cl.set_locale("ru_RU")
+    cl.set_country("KZ")
+    cl.set_country_code(7)
+    cl.set_timezone_offset(5 * 3600)
+    cl.delay_range = [4.0, 9.0]
+
+    settings_file = os.environ.get("IG_SETTINGS_FILE")
+    if settings_file:
+        return InstagramAdapter(client=cl, hydrate_views=hydrate_views).load_session(settings_file)
+
+    sessionid = os.environ.get("IG_SESSIONID")
+    if not sessionid:
+        sess_path = _ROOT / "secrets" / "ig_browser_session.json"
+        if sess_path.exists():
+            try:
+                sessionid = json.loads(sess_path.read_text()).get("sessionid")
+            except (json.JSONDecodeError, OSError):
+                sessionid = None
+
+    if sessionid:
+        cl.login_by_sessionid(sessionid)
+        return InstagramAdapter(client=cl, hydrate_views=hydrate_views)
+
+    raise RuntimeError(
+        "Instagram needs a burner session: set IG_SETTINGS_FILE or IG_SESSIONID, "
+        "or provide secrets/ig_browser_session.json (see adapters/instagram/README.md)."
+    )
+
+
+def harvest_instagram_explore(
+    session,
+    *,
+    target: int,
+    geo_tier: str = "KZ",
+    headless: bool = True,
+) -> dict:
+    """Harvest fresh, celebrity-filtered posts from the Instagram **Explore tab**.
+
+    This is IG's discovery surface — organic trending content from many creators,
+    not a fixed set of seed accounts (which is why the old seed path only ever
+    surfaced celebrities). Drives the browser Explore harvester and, for each
+    newly-intercepted item, drops celebrities, normalizes to a PostRecord, and
+    upserts it — counting only KEPT, new-to-corpus posts toward ``target``. So a
+    request for N yields up to N good posts with no scrape-then-delete.
+
+    Best-effort: on captcha/checkpoint/session-expiry the harvester stops cleanly
+    and we return what we collected. Returns
+    ``{fetched, new, skipped_celebrity, blocked, blocked_reason}``.
+    """
+    from adapters.instagram.explore_harvest import harvest_explore
+    from adapters.instagram import InstagramAdapter
+
+    # Offline normalizer — no login/network needed to turn a raw media dict into a
+    # PostRecord (the browser persona does the actual fetching).
+    conv = InstagramAdapter(hydrate_views=False)
+    stats = {"fetched": 0, "new": 0, "skipped_celebrity": 0}
+
+    def _on_new_item(pk: str, raw: dict) -> None:
+        stats["fetched"] += 1
+        author = (raw.get("user") or {}).get("username")
+        if not author:
+            return  # filler/carousel-child without an author — not a real post
+        # Explore payloads omit follower_count, so filter by handle denylist here.
+        if is_celebrity(author):
+            stats["skipped_celebrity"] += 1
+            return
+        acct = WatchedAccount(
+            handle=author, platform="instagram", segment="adjacent", geo_tier=geo_tier
+        )
+        try:
+            rec = conv._to_record(raw, acct)
+        except Exception:
+            rec = None
+        if rec is None or not rec.raw:
+            return
+        if session.get(Post, (rec.platform, rec.platform_post_id)) is not None:
+            return  # already in corpus — not fresh
+        upsert_post(session, rec, source="live_instagram_explore")
+        session.commit()
+        stats["new"] += 1
+
+    def _reached() -> bool:
+        return stats["new"] >= target
+
+    summary = harvest_explore(
+        target=target,
+        headless=headless,
+        on_new_item=_on_new_item,
+        target_reached=_reached,
+    )
+    return {
+        **stats,
+        "blocked": summary.get("blocked"),
+        "blocked_reason": summary.get("blocked_reason"),
+    }
 
 
 def harvest_live(
@@ -538,7 +760,11 @@ def harvest_live(
     - x:        auth-free syndication (most reliable).
     - threads:  Playwright profile harvest of seed handles.
     - tiktok:   Explore/FYP discovery (no account list needed).
-    - instagram: only if watchlisted (needs an instagrapi session) — else skipped.
+    - instagram: Explore-tab discovery via a browser persona, celebrity-filtered
+      inline (harvest_instagram_explore) — organic trends, not seed accounts.
+
+    All platforms drop celebrity/mega-accounts during the scrape so a requested
+    per-platform target yields that many *good* posts (no scrape-then-delete).
     """
     init_db()
     platforms = platforms or ["x", "threads", "tiktok", "instagram"]
@@ -548,19 +774,87 @@ def harvest_live(
         for plat in platforms:
             result = {"fetched": 0, "new": 0, "error": None}
             try:
-                adapter = _make_adapter(plat)
+                # IG uses the browser Explore persona (built inside
+                # harvest_instagram_explore), not the instagrapi adapter — so
+                # don't construct/login it here (that would be needless + can raise).
+                adapter = None if plat == "instagram" else _make_adapter(plat)
 
-                records: list[PostRecord] = []
+                # Persist + COMMIT per batch so partial progress survives an
+                # interruption (IG's anti-ban pacing makes a full sweep slow).
+                new_count = 0
+
+                def _persist(recs: list[PostRecord]) -> None:
+                    nonlocal new_count
+                    for rec in recs:
+                        if new_count >= per_platform:
+                            break
+                        if not rec.raw:  # never persist an empty-raw hole
+                            continue
+                        # Filter celebrities IN the scrape loop: skipped posts never
+                        # count toward the target and are never stored, so N requested
+                        # yields N good posts (no scrape-then-delete).
+                        if is_celebrity(rec.account_handle, rec.author_follower_count):
+                            continue
+                        is_new = session.get(Post, (rec.platform, rec.platform_post_id)) is None
+                        upsert_post(session, rec, source=f"live_{plat}")
+                        if is_new:
+                            new_count += 1
+                    session.commit()
+
+                # 1) Discovery surface (TikTok today): brand-new viral posts, no
+                #    account needed. Best-effort top-up toward the target.
                 if plat == "tiktok":
-                    # Discovery surface — brand-new viral posts, no account needed.
                     try:
-                        records = adapter.fetch_viral_posts(geo_tier="KZ", period_days=7)
+                        recs = adapter.fetch_viral_posts(geo_tier="KZ", period_days=7)
                     except NotImplementedError:
-                        records = []
-                else:
-                    handles = _watchlist_handles(session, plat)
+                        recs = []
+                    result["fetched"] += len(recs)
+                    print(f"[live] {plat}: parsed {len(recs)} discovery posts")
+                    _persist(recs)
+
+                # 1b) Instagram discovery = the Explore tab (organic trends across
+                #     many creators), celebrity-filtered inline. Replaces the old
+                #     seed-account path that only ever surfaced celebrities.
+                if plat == "instagram":
+                    print(
+                        f"[live] instagram: harvesting Explore tab toward "
+                        f"{per_platform} (celebrity-filtered)"
+                    )
+                    try:
+                        ex = harvest_instagram_explore(
+                            session, target=per_platform, geo_tier="KZ", headless=True
+                        )
+                        result["fetched"] += ex.get("fetched", 0)
+                        new_count += ex.get("new", 0)
+                        print(
+                            f"[live] instagram: explore parsed={ex.get('fetched')} "
+                            f"new={ex.get('new')} skipped_celebrity={ex.get('skipped_celebrity')} "
+                            f"blocked={ex.get('blocked')}"
+                        )
+                        if ex.get("blocked"):
+                            print(f"[live] instagram: explore blocked: {ex.get('blocked_reason')}")
+                    except Exception as exc:
+                        print(
+                            f"[live] instagram explore failed (non-fatal): "
+                            f"{type(exc).__name__}: {str(exc)[:160]}"
+                        )
+                    result["new"] = new_count
+                    print(f"[live] {plat}: TOTAL parsed={result['fetched']} new={result['new']}")
+                    summary[plat] = result
+                    continue  # skip the seed-account path for IG
+
+                # 2) Account-handle harvesting (X / Threads). Spread the remaining
+                #    target across handles — many accounts shallow — so we reach
+                #    volume by breadth, not by hammering a few accounts deep.
+                handles = _watchlist_handles(session, plat)
+                if handles and new_count < per_platform:
+                    per_handle = max(25, -(-per_platform // len(handles)))  # ceil div
+                    print(
+                        f"[live] {plat}: harvesting {len(handles)} handle(s) "
+                        f"~{per_handle}/handle toward {per_platform}: {handles}"
+                    )
                     for handle in handles:
-                        if result["fetched"] >= per_platform:
+                        if new_count >= per_platform:
                             break
                         acct = WatchedAccount(
                             handle=handle,
@@ -569,27 +863,21 @@ def harvest_live(
                             geo_tier=geo_tier,
                         )
                         try:
-                            got = adapter.fetch_account_posts(acct, limit=max(5, per_platform // 2))
+                            got = adapter.fetch_account_posts(acct, limit=per_handle)
                         except Exception as exc:  # one account failing is non-fatal
                             print(f"[live] {plat}@{handle}: {type(exc).__name__}: {str(exc)[:120]}")
                             continue
-                        records.extend(got)
                         result["fetched"] += len(got)
+                        before = new_count
+                        _persist(got)  # commit this account before moving on
+                        print(
+                            f"[live] {plat}@{handle}: parsed {len(got)} posts "
+                            f"(+{new_count - before} new, {result['fetched']} parsed, "
+                            f"{new_count}/{per_platform} new so far)"
+                        )
 
-                # Upsert (cap new rows at per_platform to bound work)
-                new_count = 0
-                for rec in records:
-                    if new_count >= per_platform:
-                        break
-                    if not rec.raw:  # never persist an empty-raw hole
-                        continue
-                    is_new = session.get(Post, (rec.platform, rec.platform_post_id)) is None
-                    upsert_post(session, rec, source=f"live_{plat}")
-                    if is_new:
-                        new_count += 1
-                session.commit()
-                result["fetched"] = result["fetched"] or len(records)
                 result["new"] = new_count
+                print(f"[live] {plat}: TOTAL parsed={result['fetched']} new={result['new']}")
             except Exception as exc:
                 session.rollback()
                 result["error"] = f"{type(exc).__name__}: {str(exc)[:160]}"
@@ -599,6 +887,49 @@ def harvest_live(
         session.close()
     print(f"[live] harvest summary: {summary}")
     return summary
+
+
+def resnapshot_post(platform: str, platform_post_id: str, *, limit: int = 25) -> dict:
+    """Re-observe a SINGLE post live right now and append a fresh snapshot.
+
+    Adapters have no single-post fetch, so we pull the author's recent posts,
+    find this id, and upsert it (which appends a `post_snapshots` row with the
+    current metrics). Bounded + synchronous — this backs the lightbox
+    "fetch fresh data" button that adds a new point to the stats graph.
+
+    Returns ``{status: updated|not_found|error, fetched: int, error?: str}``.
+    A post that has scrolled out of the author's recent feed yields ``not_found``.
+    """
+    init_db()
+    session = get_session()
+    try:
+        post = session.get(Post, (platform, platform_post_id))
+        if post is None:
+            return {"status": "error", "error": "post not found in DB"}
+        if not post.account_handle:
+            return {"status": "error", "error": "post has no account handle to re-fetch"}
+        try:
+            adapter = _make_adapter(platform, ig_hydrate_views=True)
+            acct = WatchedAccount(
+                handle=post.account_handle,
+                platform=platform,
+                segment="adjacent",
+                geo_tier=post.geo_tier or "World",
+            )
+            records = adapter.fetch_account_posts(acct, limit=limit)
+        except Exception as exc:
+            return {"status": "error", "error": f"{type(exc).__name__}: {str(exc)[:160]}"}
+
+        match = next((r for r in records if r.platform_post_id == platform_post_id), None)
+        if match is None:
+            return {"status": "not_found", "fetched": len(records)}
+        if not match.raw:
+            return {"status": "error", "error": "re-fetched record had empty raw"}
+        upsert_post(session, match, source="resnapshot")
+        session.commit()
+        return {"status": "updated", "fetched": len(records)}
+    finally:
+        session.close()
 
 
 # ---------------------------------------------------------------------------

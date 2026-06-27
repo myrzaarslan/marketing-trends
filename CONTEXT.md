@@ -23,6 +23,14 @@ The form of a Viral Post's content: `video`, `image`, or `text`. Lets the unifie
 The complete *extracted* content of a top-ranked Viral Post — every media file (video, all carousel images, cover/thumbnail), the full caption and any spoiler-hidden text, the sound/music used, and the author's identity — captured so a marketer can study and recreate the post. It records what the post *contains*, not an automated interpretation of what it *depicts* (bot understanding is deliberately out of scope — see OPEN-QUESTIONS Q-6). Produced only for the top-N of a Digest, never the whole corpus.
 _Avoid_: enrichment (that's the *process* that produces a Content Bundle), media dump, scrape
 
+**Song (Sound)**:
+A piece of audio used across posts, surfaced as its own rankable entity — "what audio is going viral." Identified **per-platform** by a stable key (`sound_id` where present — TikTok `music.id` / Instagram `audio_cluster_id` — else a `name:<normalized>` fallback); a TikTok sound and an Instagram sound are separate Songs (no fuzzy cross-platform matching). TikTok + Instagram only (the platforms with reliable sound metadata). A Song aggregates the Posts that use it and carries every ranking metric at once — **reuse count** (the headline: how many videos use it), adoption (post count), distinct creators, total reach (views), total engagement, average engagement rate, and **rising** (recent adoption) — the user picks which to rank by (default **Reused most**), with the same period filter and Refresh model (Seen/Pinned/Hidden) as the post Digest.
+_Avoid_: track (ambiguous with the post time series), audio file (that's one media item), trend (a Song is one artifact; a Trend is a pattern)
+
+**Reuse count / Sound pivot**:
+The platform's *own* count of how many videos use a Song — the real "reused most" signal, which the post aggregate can't see (we only ever sample a few of a sound's videos). It's obtained by a **sound pivot**: hitting the platform's sound page — TikTok `/api/music/detail` (`stats.videoCount`, e.g. 740K) or Instagram's audio page `clips/music/` (`formatted_clips_media_count`, parsed to a magnitude) — which also returns a batch of the videos using the sound (upserted as Posts, source `sound_pivot`). Pivot candidates come from platform trending-sound lists (TikTok FYP sounds / IG `music_top_trends`) and the sounds already in the corpus. A pivoted Song stores an authoritative `Sound` row; an un-pivoted one falls back to our **observed** post-count (a floor, shown with a `+`/`≈`), so the list is never empty.
+_Avoid_: play count (that's a per-video view metric), popularity (vague)
+
 **Watchlist**:
 The human-curated set of accounts the tool monitors for Viral Posts. The operational definition of "education accounts we care about" — whatever marketing adds is, by definition, in scope.
 _Avoid_: feed, sources, follow list
@@ -77,9 +85,25 @@ A user-created, named group of saved Posts (title + optional description). A Pos
 _Avoid_: folder, playlist, board
 
 **Note**:
-A single editable free-text note attached to a Post, **global** to that Post — it shows everywhere the Post appears (home Digest, every Collection, the post viewer). One Post, one Note.
+A single editable free-text note attached to a Post **per User** — it shows everywhere that user sees the Post (home Digest, every Collection, the post viewer). One Post, one Note per user.
 _Avoid_: comment (that's platform-side), tag, annotation
 
 **Pinned / Hidden**:
-Two per-post user flags that steer Refresh. **Pinned** posts survive a hard refresh (they stay in the Working Set). **Hidden** posts are removed from the Digest entirely ("don't show me this") — excluded from every list except an explicit `include_hidden` request. Both are global to the Post, independent of any Collection.
+Two per-User, per-Post flags that steer Refresh. **Pinned** posts survive a hard refresh (they stay in the Working Set). **Hidden** posts are removed from the Digest entirely ("don't show me this") — excluded from every list except an explicit `include_hidden` request. Both apply to the Post for that user, independent of any Collection.
 _Avoid_: starred/blocked, favorite/mute
+
+**Corpus**:
+The central, shared source of truth — the union of everything every Node has harvested. Two stores: **Postgres** for canonical metadata (PostRecords, append-only Snapshots) and **S3** object storage for media bundles. The Corpus never scrapes (so it can live on a datacenter IP); Nodes contribute to it. See [ADR-0006](docs/adr/0006-distributed-local-nodes-central-corpus.md).
+_Avoid_: database (ambiguous — the local Replica is also a database), backend
+
+**Node**:
+One marketing-team member's local install. A full app that harvests + enriches on its own **residential IP**, contributes results to the Corpus, and serves a local Replica for browsing. There is no central scraper — the Nodes' consumer connections are the egress.
+_Avoid_: client (it both reads and writes), server
+
+**Replica**:
+The Node's local SQLite copy of the Corpus, synced forward by a **watermark** cursor. Used for fast/offline reading and ranking; never the source of truth. Harvested data is write-through to the Corpus, not authoritative on the Node.
+_Avoid_: cache (it's a queryable replica, not just media bytes), mirror
+
+**User**:
+An identity within a Node, established name-only: type a name to create, or pick an existing name to log in (no passwords — internal tool). Personal state (Collections, Notes, Pinned/Hidden/Seen) is namespaced by `user_id` and synced through the Corpus so the team can share it.
+_Avoid_: account (overloaded with platform login accounts), profile

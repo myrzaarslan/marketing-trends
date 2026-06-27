@@ -4,6 +4,7 @@ import {
   createCollection,
   deleteCollection,
   deleteNote,
+  enrichPost,
   fetchDigest,
   fetchDigestMeta,
   fetchRefreshStatus,
@@ -19,8 +20,10 @@ import {
 import { DigestCard } from './components/DigestCard';
 import { CollectionsBar } from './components/CollectionsBar';
 import { RefreshMenu } from './components/RefreshMenu';
+import type { RefreshOpts } from './components/RefreshMenu';
 import { FilterBar } from './components/FilterBar';
 import { PostLightbox } from './components/PostLightbox';
+import { SongsView } from './components/SongsView';
 import type {
   Collection,
   CollectionDetail,
@@ -51,6 +54,9 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [refreshStatus, setRefreshStatus] = useState<string | null>(null);
   const [totalCount, setTotalCount] = useState(0);
+
+  // Top-level section: the post digest, or the Sounds (viral songs) view.
+  const [section, setSection] = useState<'digest' | 'songs'>('digest');
 
   // Collections
   const [collections, setCollections] = useState<Collection[]>([]);
@@ -97,6 +103,7 @@ export default function App() {
   }, []);
 
   const openCollection = useCallback(async (id: number) => {
+    setSection('digest');
     setLoading(true);
     setError(null);
     try {
@@ -109,9 +116,15 @@ export default function App() {
   }, []);
 
   const goHome = useCallback(() => {
+    setSection('digest');
     setActiveCollection(null);
     loadDigest(filters);
   }, [filters, loadDigest]);
+
+  const goSongs = useCallback(() => {
+    setSection('songs');
+    setActiveCollection(null);
+  }, []);
 
   useEffect(() => {
     loadDigest(filters);
@@ -128,6 +141,12 @@ export default function App() {
     );
     setOpenCard((oc) => (oc && keyOf(oc) === k ? { ...oc, ...partial } : oc));
   }, []);
+
+  // When the lightbox finishes on-demand enrichment, reflect the new thumbnail
+  // on the card so closing the lightbox shows downloaded media immediately.
+  const onEnriched = useCallback((card: DigestCardType, thumbnail: string | null) => {
+    patchCard(keyOf(card), { thumbnail, has_content_bundle: true, has_content: true });
+  }, [patchCard]);
 
   // -- filters ---------------------------------------------------------------
 
@@ -168,19 +187,38 @@ export default function App() {
     }
   };
 
-  const runHardRefresh = async (source: RefreshSource, serveIds: [string, string][]) => {
+  const runHardRefresh = async (
+    source: RefreshSource,
+    serveIds: [string, string][],
+    opts?: { count?: number; platforms?: string[]; liveDepth?: number },
+  ) => {
+    const count = opts?.count ?? filters.limit;
+    const platforms = opts?.platforms ?? [];
+    // For a live harvest, never scrape fewer than we intend to show.
+    const liveDepth =
+      opts?.liveDepth != null ? Math.max(opts.liveDepth, count) : undefined;
     try {
       const { job_id } = await triggerHardRefresh({
         source,
         serve_ids: serveIds,
         platform: filters.platform || null,
+        platforms: platforms.length ? platforms : null,
         geo: filters.geo || null,
         period: filters.period,
         sort: filters.sort,
-        limit: filters.limit,
+        limit: count,
+        ...(liveDepth != null ? { live_per_platform: liveDepth } : {}),
       });
       pollJob(job_id, () => {
-        const next = { ...filters, unseen_only: true };
+        // Reflect the chosen scope in the reloaded working set: a multi-platform
+        // pick uses `platforms`; otherwise keep the single-platform filter bar.
+        const next: typeof filters = {
+          ...filters,
+          limit: count,
+          platforms: platforms.length ? platforms : undefined,
+          platform: platforms.length ? '' : filters.platform,
+          unseen_only: true,
+        };
         setFilters(next);
         setActiveCollection(null);
         loadDigest(next);
@@ -196,8 +234,10 @@ export default function App() {
   const currentServeIds = (): [string, string][] =>
     cards.map((c) => [c.platform, c.platform_post_id] as [string, string]);
 
-  const handleHardCorpus = () => runHardRefresh('corpus', currentServeIds());
-  const handleHardLive = () => runHardRefresh('live', currentServeIds());
+  const handleHardCorpus = (opts: RefreshOpts) =>
+    runHardRefresh('corpus', currentServeIds(), opts);
+  const handleHardLive = (opts: RefreshOpts) =>
+    runHardRefresh('live', currentServeIds(), opts);
 
   const handleRefreshSelected = () => {
     const ids = cards
@@ -319,6 +359,41 @@ export default function App() {
 
   const viewCards = activeId === null ? cards : (activeCollection?.cards ?? []);
 
+  // Background pre-download: walk the visible list and enrich any card whose media
+  // isn't downloaded yet, one at a time with gentle pacing, so thumbnails fill in
+  // without the user having to open each post. Attempted keys are remembered so we
+  // never re-hit the same post; the lightbox's on-demand enrich still takes priority.
+  const enrichAttempted = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    let cancelled = false;
+    const queue = viewCards.filter(
+      (c) => !c.has_content_bundle && !enrichAttempted.current.has(keyOf(c)),
+    );
+    if (queue.length === 0) return;
+    (async () => {
+      for (const card of queue) {
+        if (cancelled) return;
+        const k = keyOf(card);
+        enrichAttempted.current.add(k);
+        try {
+          const nb = await enrichPost(card.platform, card.platform_post_id);
+          if (cancelled) return;
+          if (nb.enriched) {
+            patchCard(k, {
+              thumbnail: nb.thumbnail ?? null,
+              has_content_bundle: true,
+              has_content: true,
+            });
+          }
+        } catch {
+          enrichAttempted.current.delete(k); // allow a retry on next load
+        }
+        await new Promise((r) => setTimeout(r, 250));
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [viewCards, patchCard]);
+
   const handleOpenCard = (card: DigestCardType) => {
     const rank = viewCards.findIndex((c) => keyOf(c) === keyOf(card)) + 1;
     setOpenCard(card);
@@ -348,39 +423,55 @@ export default function App() {
           <span className="header-subtitle">EdTech KZ/CIS specimen viewer</span>
         </div>
         <div className="header-right">
-          {refreshStatus && (
-            <span className={`refresh-badge refresh-${refreshStatus}`}>
-              {refreshStatus === 'queued' && '⟳ Queued'}
-              {refreshStatus === 'running' && '⟳ Working…'}
-              {refreshStatus === 'done' && '✓ Updated'}
-              {refreshStatus === 'error' && '✕ Error'}
-            </span>
+          {section === 'digest' && (
+            <>
+              {refreshStatus && (
+                <span className={`refresh-badge refresh-${refreshStatus}`}>
+                  {refreshStatus === 'queued' && '⟳ Queued'}
+                  {refreshStatus === 'running' && '⟳ Working…'}
+                  {refreshStatus === 'done' && '✓ Updated'}
+                  {refreshStatus === 'error' && '✕ Error'}
+                </span>
+              )}
+              <RefreshMenu
+                running={refreshRunning}
+                selectionMode={selectionMode}
+                selectedCount={selected.size}
+                defaultCount={filters.limit}
+                onSoft={handleSoftRefresh}
+                onHardCorpus={handleHardCorpus}
+                onHardLive={handleHardLive}
+                onToggleSelectionMode={() => setSelectionMode((v) => !v)}
+                onRefreshSelected={handleRefreshSelected}
+              />
+            </>
           )}
-          <RefreshMenu
-            running={refreshRunning}
-            selectionMode={selectionMode}
-            selectedCount={selected.size}
-            onSoft={handleSoftRefresh}
-            onHardCorpus={handleHardCorpus}
-            onHardLive={handleHardLive}
-            onToggleSelectionMode={() => setSelectionMode((v) => !v)}
-            onRefreshSelected={handleRefreshSelected}
-          />
         </div>
       </header>
 
       <CollectionsBar
         collections={collections}
         activeId={activeId}
+        songsActive={section === 'songs'}
         onSelectHome={goHome}
+        onSelectSongs={goSongs}
         onSelectCollection={openCollection}
         onCreate={(title) => { onCreateCollection(title); }}
       />
 
-      {activeId === null && (
+      {section === 'digest' && activeId === null && (
         <FilterBar filters={filters} meta={meta} onChange={handleFiltersChange} />
       )}
 
+      {section === 'songs' && (
+        <SongsView
+          collections={collections}
+          onCreateCollection={onCreateCollection}
+          reloadCollections={loadCollections}
+        />
+      )}
+
+      {section === 'digest' && (
       <main className="digest-main">
         {error && (
           <div className="error-banner"><strong>Error:</strong> {error}</div>
@@ -468,8 +559,9 @@ export default function App() {
           </>
         )}
       </main>
+      )}
 
-      {openCard && (
+      {openCard && section === 'digest' && (
         <PostLightbox
           card={openCard}
           rank={openRank}
@@ -480,6 +572,7 @@ export default function App() {
           onToggleCollection={onToggleCollection}
           onCreateCollection={onCreateCollection}
           onSaveNote={onSaveNote}
+          onEnriched={onEnriched}
         />
       )}
     </div>

@@ -47,7 +47,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from core.adapter import PlatformAdapter
-from core.schema import GeoTier, PostRecord, Trend, WatchedAccount
+from core.schema import GeoTier, PostRecord, SoundRecord, Trend, WatchedAccount
 
 # A browser-ish UA is required by both paths or TikTok serves blocked/empty shells.
 _USER_AGENT = (
@@ -202,6 +202,104 @@ class TikTokAdapter(PlatformAdapter):
                 if len(items) >= limit:
                     break
         return items
+
+    # == sound pivot (the "reused most" path) =================================
+
+    def fetch_sound(
+        self, sound_id: str, *, videos_limit: int = 30
+    ) -> "tuple[SoundRecord, list[PostRecord]]":
+        """Pivot on one sound: its authoritative reuse count + the videos using it.
+
+        Hits TikTok's ``/api/music/detail`` via TikTok-Api's ``Sound.info()`` — the
+        same signed-session path as account posts — to read ``stats.videoCount``
+        (how many videos use this sound across all of TikTok, the "reused most"
+        signal) and the sound's metadata, then pages ``Sound.videos()`` for a sample
+        of the videos using it (returned as normal PostRecords so they enrich the
+        corpus too). The SoundRecord.raw keeps the complete music-detail payload.
+        """
+        import asyncio  # noqa: PLC0415
+
+        return asyncio.run(self._fetch_sound_async(sound_id, videos_limit))
+
+    async def _fetch_sound_async(
+        self, sound_id: str, videos_limit: int
+    ) -> "tuple[SoundRecord, list[PostRecord]]":
+        try:
+            from TikTokApi import TikTokApi  # noqa: PLC0415
+        except ImportError as e:
+            raise RuntimeError(
+                "TikTokApi is required for the sound-pivot path. "
+                "Install it: pip install -r adapters/tiktok/requirements.txt"
+            ) from e
+
+        fetched_at = datetime.now(timezone.utc)
+        async with TikTokApi() as api:
+            await api.create_sessions(
+                num_sessions=1,
+                sleep_after=3,
+                browser="chromium",
+                headless=self._tiktokapi_headless,
+            )
+            snd = api.sound(id=str(sound_id))
+            info = await snd.info()
+            sound_rec = self._sound_record_from_info(snd, info, sound_id, fetched_at)
+
+            records: list[PostRecord] = []
+            if videos_limit > 0:
+                try:
+                    async for video in snd.videos(count=videos_limit):
+                        try:
+                            records.append(
+                                self._record_from_api(video.as_dict, fetched_at)
+                            )
+                        except (KeyError, TypeError):
+                            continue
+                        if len(records) >= videos_limit:
+                            break
+                except Exception:
+                    # A sound with restricted/empty video listing still yields its
+                    # count + metadata — don't lose those to a videos() failure.
+                    pass
+        return sound_rec, records
+
+    def _sound_record_from_info(
+        self, snd: Any, info: dict, sound_id: str, fetched_at: datetime
+    ) -> SoundRecord:
+        """Normalize a ``/api/music/detail`` payload into a SoundRecord.
+
+        Tolerant of both shapes TikTok returns: a ``musicInfo`` envelope (the
+        logged-in detail) and a bare ``music``/``stats`` pair.
+        """
+        mi = info.get("musicInfo") if isinstance(info, dict) else None
+        mi = mi if isinstance(mi, dict) else {}
+        music = mi.get("music") or (info.get("music") if isinstance(info, dict) else None) or {}
+        stats = mi.get("stats") or (info.get("stats") if isinstance(info, dict) else None) or {}
+        author = mi.get("author") or {}
+        author_name = None
+        if isinstance(author, dict):
+            author_name = author.get("nickname") or author.get("uniqueId")
+        elif isinstance(author, str):
+            author_name = author
+        author_name = author_name or music.get("authorName")
+
+        return SoundRecord(
+            platform=self.platform,
+            sound_id=str(getattr(snd, "id", None) or music.get("id") or sound_id),
+            fetched_at=fetched_at,
+            raw=info if isinstance(info, dict) else {"raw": info},
+            title=getattr(snd, "title", None) or music.get("title"),
+            author_name=author_name,
+            video_count=self._int(stats.get("videoCount")),
+            is_original=(
+                bool(music.get("original")) if music.get("original") is not None else None
+            ),
+            cover_url=(
+                music.get("coverLarge") or music.get("coverMedium")
+                or music.get("coverThumb") or getattr(snd, "cover_large", None)
+            ),
+            play_url=music.get("playUrl") or getattr(snd, "play_url", None),
+            duration_sec=self._num(music.get("duration") or getattr(snd, "duration", None)),
+        )
 
     def _fetch_entries(self, account: WatchedAccount, limit: int) -> list[dict]:
         """Pull flat-playlist entries for an account, with a sec_uid fallback.

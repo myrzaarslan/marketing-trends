@@ -383,11 +383,25 @@ def harvest_explore(
     stall_after: int = STALL_AFTER,
     max_reloads: int = MAX_RELOADS,
     headless: bool = True,
+    on_new_item=None,
+    target_reached=None,
 ) -> dict:
     """Run an unattended Explore harvest and return a summary dict.
 
     Accumulates from persisted state; saves on exit.
+
+    Hooks (used by the live-ingest wiring in core.ingest):
+    - ``on_new_item(pk, raw)`` is called for each newly-intercepted raw media
+      item, letting the caller filter (e.g. drop celebrities), normalize, and
+      upsert it into the DB on the fly.
+    - ``target_reached()`` overrides the default stop condition (accumulated rows
+      >= target). The caller returns True once it has collected enough *kept*
+      posts, so celebrity-skips don't count toward the goal.
     """
+    def _reached() -> bool:
+        if target_reached is not None:
+            return bool(target_reached())
+        return len(known_ids) >= target
     print(f"\n{'='*60}")
     print(f"Instagram Explore harvest — target={target} max_reloads={max_reloads}")
     print(f"{'='*60}")
@@ -400,13 +414,38 @@ def harvest_explore(
     blocked_reason = ""
     blockers_hit: list[str] = []
 
+    def _drain() -> int:
+        """Normalize any newly-intercepted raw items into rows; notify the caller.
+
+        Returns the count of new items added this call. Shared by the initial-load
+        and per-scroll collection points so the on_new_item hook fires uniformly.
+        """
+        nonlocal run_new
+        added = 0
+        for pk, raw in list(raw_by_id.items()):
+            if pk in known_ids:
+                continue
+            row = _normalize_row(pk, raw)
+            if not row:
+                continue
+            rows.append(row)
+            known_ids.add(pk)
+            added += 1
+            run_new += 1
+            if on_new_item is not None:
+                try:
+                    on_new_item(pk, raw)
+                except Exception as cb_exc:  # a bad item must not sink the harvest
+                    print(f"[harvest] on_new_item error for {pk}: {cb_exc}")
+        return added
+
     ctx = launch_persona(PERSONA, headless=headless)
     page = ctx.new_page()
 
     try:
         for reload_num in range(max_reloads + 1):
-            if len(known_ids) >= target:
-                print(f"[harvest] target {target} reached — stopping")
+            if _reached():
+                print(f"[harvest] target reached — stopping")
                 break
 
             # Counters reset per reload
@@ -448,22 +487,14 @@ def harvest_explore(
 
             # Collect what loaded immediately
             # (response listener fires during navigation)
-            new_after_nav = 0
-            for pk, raw in list(raw_by_id.items()):
-                if pk not in known_ids:
-                    row = _normalize_row(pk, raw)
-                    if row:
-                        rows.append(row)
-                        known_ids.add(pk)
-                        new_after_nav += 1
-                        run_new += 1
+            new_after_nav = _drain()
             if new_after_nav:
                 print(f"[reload {reload_num}] {new_after_nav} items on initial load → total={len(known_ids)}")
 
             # Scroll loop
             stall_count = 0
             for scroll_num in range(max_scrolls_per_load):
-                if len(known_ids) >= target:
+                if _reached():
                     break
 
                 counters["new_since_scroll"] = 0
@@ -472,15 +503,7 @@ def harvest_explore(
                 human_pause(SCROLL_PAUSE_MIN, SCROLL_PAUSE_MAX)
 
                 # Collect any new items that arrived
-                batch_new = 0
-                for pk, raw in list(raw_by_id.items()):
-                    if pk not in known_ids:
-                        row = _normalize_row(pk, raw)
-                        if row:
-                            rows.append(row)
-                            known_ids.add(pk)
-                            batch_new += 1
-                            run_new += 1
+                batch_new = _drain()
 
                 if batch_new:
                     stall_count = 0
@@ -532,7 +555,7 @@ def harvest_explore(
             except Exception:
                 pass
 
-            if len(known_ids) >= target:
+            if _reached():
                 break
 
             if reload_num < max_reloads:
